@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -178,6 +179,16 @@ def secret_image_filenames_sorted() -> list[str]:
         if path.is_file() and allowed_file(path.name):
             files.append(path.name)
     return sorted(files, key=str.casefold)
+
+
+def unique_slide_filename(filename: str) -> str:
+    candidate = filename
+    path = Path(filename)
+    index = 2
+    while slide_exists(candidate):
+        candidate = f"{path.stem}-{index}{path.suffix}"
+        index += 1
+    return candidate
 
 
 def list_slides() -> list[str]:
@@ -1021,21 +1032,29 @@ BASE_STYLE = """
   }
   .secret-gallery-actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
     padding: 0 9px 9px;
   }
-  .secret-gallery-output {
+  .secret-gallery-output,
+  .secret-gallery-copy {
     min-height: 36px;
     border: 1px solid rgba(255,255,255,.22);
     border-radius: 8px;
-    background: #f59e0b;
-    color: #111827;
     font-size: .82rem;
     font-weight: 950;
     cursor: pointer;
   }
+  .secret-gallery-output {
+    background: #f59e0b;
+    color: #111827;
+  }
   .secret-gallery-output:hover { background: #fbbf24; }
+  .secret-gallery-copy {
+    background: rgba(255,255,255,.1);
+    color: #fff;
+  }
+  .secret-gallery-copy:hover { background: rgba(255,255,255,.18); }
   .secret-gallery-delete {
     position: absolute;
     top: 7px;
@@ -1362,6 +1381,7 @@ def control():
                 <button class="secret-gallery-delete" data-secret-delete="{{ image }}" type="button" title="Löschen">×</button>
                 <div class="secret-gallery-name">{{ image }}</div>
                 <div class="secret-gallery-actions">
+                  <button class="secret-gallery-copy" data-secret-copy="{{ image }}" type="button">Kopieren</button>
                   <button class="secret-gallery-output" data-secret-set="{{ image }}" type="button">Ausgeben</button>
                 </div>
               </article>
@@ -1717,6 +1737,25 @@ def control():
             await setCurrent(current, {animate: true, previewSrc});
             button.disabled = false;
           }
+          async function copySecretImageToGallery(name, button) {
+            if (!name) return;
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = "Kopiere...";
+            const response = await fetch("/api/secret-gallery/copy-to-gallery", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({filename: name})
+            });
+            if (!response.ok) {
+              button.disabled = false;
+              button.textContent = originalText;
+              alert("Grafik konnte nicht kopiert werden.");
+              return;
+            }
+            button.textContent = "Kopiert";
+            window.setTimeout(() => window.location.reload(), 250);
+          }
           async function rotateSlide(name) {
             if (!name) return;
             const response = await fetch("/api/rotate", {
@@ -1749,6 +1788,13 @@ def control():
               event.stopPropagation();
               event.preventDefault();
               deleteSecretImage(button.dataset.secretDelete);
+            });
+          });
+          document.querySelectorAll("[data-secret-copy]").forEach((button) => {
+            button.addEventListener("click", (event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              copySecretImageToGallery(button.dataset.secretCopy, button);
             });
           });
           document.querySelectorAll("[data-secret-set]").forEach((button) => {
@@ -2406,6 +2452,33 @@ def api_secret_gallery_delete():
         write_state({**state, "current": "", "version": state["version"] + 1})
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/secret-gallery/copy-to-gallery", methods=["POST"])
+@login_required
+def api_secret_gallery_copy_to_gallery():
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("filename", "")
+    if not isinstance(requested, str) or requested != os.path.basename(requested) or not secret_image_exists(requested):
+        return jsonify({"ok": False, "error": "unknown secret image"}), 400
+
+    source = safe_join(str(SECRET_GALLERY_DIR), requested)
+    target_name = unique_slide_filename(requested)
+    target = safe_join(str(SLIDES_DIR), target_name)
+    if not source or not target:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+
+    try:
+        shutil.copy2(source, target)
+        delete_cached_previews(target_name)
+    except OSError:
+        return jsonify({"ok": False, "error": "copy failed"}), 400
+
+    state = read_state()
+    order = [name for name in state["order"] if name != target_name]
+    order.append(target_name)
+    write_state({**state, "order": order})
+    return jsonify({"ok": True, "filename": target_name})
 
 
 @app.route("/logos/<path:filename>")
