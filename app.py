@@ -908,16 +908,16 @@ def control():
               <button id="slide-upload-submit" type="submit" hidden disabled>Upload</button>
             </form>
             <section class="slide-list" aria-label="Grafiken">
-              <article class="slide-row bg-row {% if state.current == bg_current %}active{% endif %} {% if selected == bg_current %}selected{% endif %}" data-slide="{{ bg_current }}" data-bg="1" data-src="{% if state.background %}{{ url_for('slides', filename=state.background) }}?v={{ state.version }}{% endif %}" data-preview-src="{% if state.background %}{{ url_for('slide_preview', size_name='preview', filename=state.background) }}{% endif %}" role="button" tabindex="0">
-                {% if state.background %}<img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=state.background) }}" alt="" loading="lazy" decoding="async">{% else %}<span class="thumb">BG</span>{% endif %}
+              <article class="slide-row bg-row {% if state.current == bg_current %}active{% endif %} {% if selected == bg_current %}selected{% endif %}" data-slide="{{ bg_current }}" data-bg="1" data-src="{% if state.background %}{{ url_for('slides', filename=state.background) }}?v={{ state.version }}{% endif %}" data-preview-src="{% if state.background %}{{ url_for('slide_preview', size_name='preview', filename=state.background) }}?v={{ state.version }}{% endif %}" role="button" tabindex="0">
+                {% if state.background %}<img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=state.background) }}?v={{ state.version }}" alt="" loading="lazy" decoding="async">{% else %}<span class="thumb">BG</span>{% endif %}
                 <span class="slide-name">bg</span>
                 <span class="slide-tools">
                   <span class="slide-meta {% if state.current == bg_current %}live{% endif %}">{% if state.current == bg_current %}Live{% else %}Bereit{% endif %}</span>
                 </span>
               </article>
               {% for slide in slides %}
-              <article class="slide-row {% if slide == state.current %}active{% endif %} {% if slide == selected %}selected{% endif %}" draggable="true" data-slide="{{ slide }}" data-src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" data-preview-src="{{ url_for('slide_preview', size_name='preview', filename=slide) }}" role="button" tabindex="0">
-                <img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=slide) }}" alt="" loading="lazy" decoding="async">
+              <article class="slide-row {% if slide == state.current %}active{% endif %} {% if slide == selected %}selected{% endif %}" draggable="true" data-slide="{{ slide }}" data-src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" data-preview-src="{{ url_for('slide_preview', size_name='preview', filename=slide) }}?v={{ state.version }}" role="button" tabindex="0">
+                <img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=slide) }}?v={{ state.version }}" alt="" loading="lazy" decoding="async">
                 <span class="slide-name">{{ slide }}</span>
                 <span class="slide-tools">
                   <span class="slide-meta {% if slide == state.current %}live{% endif %}">{% if slide == state.current %}Live{% else %}Bereit{% endif %}</span>
@@ -935,7 +935,7 @@ def control():
                 <div class="monitor-label">Preview</div>
                 <div class="monitor-stage">
                   <div class="monitor-frame">
-                    {% if selected == bg_current and state.background %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=state.background) }}" alt="">{% elif selected and selected != bg_current %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=selected) }}" alt="">{% else %}<img id="preview-image" alt="">{% endif %}
+                    {% if selected == bg_current and state.background %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=state.background) }}?v={{ state.version }}" alt="">{% elif selected and selected != bg_current %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=selected) }}?v={{ state.version }}" alt="">{% else %}<img id="preview-image" alt="">{% endif %}
                   </div>
                 </div>
               </section>
