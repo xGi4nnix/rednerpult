@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,6 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data")).resolve()
 SLIDES_DIR = DATA_DIR / "slides"
 LOGOS_DIR = DATA_DIR / "logos"
+SECRET_GALLERY_DIR = DATA_DIR / "secret-gallery"
 PREVIEWS_DIR = DATA_DIR / "previews"
 STATE_FILE = DATA_DIR / "state.json"
 
@@ -55,6 +57,7 @@ def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SLIDES_DIR.mkdir(parents=True, exist_ok=True)
     LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+    SECRET_GALLERY_DIR.mkdir(parents=True, exist_ok=True)
     PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
         STATE_FILE.write_text(json.dumps(DEFAULT_STATE, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
@@ -79,6 +82,15 @@ def logo_exists(filename: str) -> bool:
     if not allowed_file(filename):
         return False
     resolved = safe_join(str(LOGOS_DIR), filename)
+    return bool(resolved and Path(resolved).is_file())
+
+
+def secret_image_exists(filename: str) -> bool:
+    if filename != os.path.basename(filename):
+        return False
+    if not allowed_file(filename):
+        return False
+    resolved = safe_join(str(SECRET_GALLERY_DIR), filename)
     return bool(resolved and Path(resolved).is_file())
 
 
@@ -142,6 +154,15 @@ def slide_filenames_sorted() -> list[str]:
     return sorted(files, key=str.casefold)
 
 
+def secret_image_filenames_sorted() -> list[str]:
+    ensure_storage()
+    files = []
+    for path in SECRET_GALLERY_DIR.iterdir():
+        if path.is_file() and allowed_file(path.name):
+            files.append(path.name)
+    return sorted(files, key=str.casefold)
+
+
 def list_slides() -> list[str]:
     return read_state()["order"]
 
@@ -199,27 +220,27 @@ def save_image_like_original(image: Image.Image, target: Path, tmp_path: Path) -
     image.save(tmp_path, **save_kwargs)
 
 
-def preview_filename(filename: str, size_name: str) -> str:
-    source = SLIDES_DIR / filename
+def preview_filename(filename: str, size_name: str, source_dir: Path, cache_group: str) -> str:
+    source = source_dir / filename
     mtime_ns = source.stat().st_mtime_ns
-    return f"{Path(filename).stem}-{mtime_ns}-{size_name}.jpg"
+    return f"{cache_group}-{Path(filename).stem}-{mtime_ns}-{size_name}.jpg"
 
 
-def generate_preview_file(filename: str, size_name: str) -> Path:
+def generate_preview_file(filename: str, size_name: str, source_dir: Path = SLIDES_DIR, cache_group: str = "slides") -> Path:
     if size_name not in PREVIEW_SIZES:
         raise ValueError("invalid preview size")
 
-    resolved = safe_join(str(SLIDES_DIR), filename)
+    resolved = safe_join(str(source_dir), filename)
     if not resolved:
         raise ValueError("invalid path")
 
-    target_name = preview_filename(filename, size_name)
+    target_name = preview_filename(filename, size_name, source_dir, cache_group)
     target = PREVIEWS_DIR / target_name
     if target.exists():
         return target
 
     width = PREVIEW_SIZES[size_name]
-    fd, tmp_name = tempfile.mkstemp(prefix=f"{Path(filename).stem}-{size_name}-", suffix=".jpg", dir=PREVIEWS_DIR)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{cache_group}-{Path(filename).stem}-{size_name}-", suffix=".jpg", dir=PREVIEWS_DIR)
     os.close(fd)
     tmp_path = Path(tmp_name)
 
@@ -242,7 +263,7 @@ def generate_preview_file(filename: str, size_name: str) -> Path:
 
 def delete_cached_previews(filename: str) -> None:
     stem = Path(filename).stem
-    for cached in PREVIEWS_DIR.glob(f"{stem}-*.jpg"):
+    for cached in PREVIEWS_DIR.glob(f"*-{stem}-*.jpg"):
         cached.unlink(missing_ok=True)
 
 
@@ -312,8 +333,26 @@ def run_git_update() -> tuple[bool, str, bool]:
     if stashed_changes:
         message += "\n\nLokale Aenderungen wurden als Git-Stash behalten."
     if local_after and local_before and local_after != local_before:
-        message += "\n\nFalls App-Code aktualisiert wurde, bitte danach rebooten."
+        message += "\n\nDie App startet jetzt mit dem neuen Stand neu."
     return True, message, local_after != local_before
+
+
+def can_restart_current_process() -> bool:
+    executable = Path(sys.executable).name.lower()
+    argv0 = Path(sys.argv[0]).name.lower() if sys.argv else ""
+    return "gunicorn" not in executable and "gunicorn" not in argv0 and bool(sys.argv)
+
+
+def schedule_app_restart() -> bool:
+    if not can_restart_current_process():
+        return False
+
+    def restart_later() -> None:
+        time.sleep(1)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    threading.Thread(target=restart_later, daemon=True).start()
+    return True
 
 
 def schedule_reboot() -> None:
@@ -500,6 +539,7 @@ BASE_STYLE = """
   }
   .panel-title { font-weight: 900; }
   .panel-subtitle { margin-top: 3px; color: var(--muted); font-size: .86rem; font-weight: 700; }
+  .panel-subtitle.secret-trigger { cursor: default; user-select: none; }
   .button, .upload button, .login button {
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -842,6 +882,110 @@ BASE_STYLE = """
     font-size: .72rem;
     font-weight: 950;
   }
+  .secret-gallery-panel {
+    width: min(1120px, 100%);
+    max-height: calc(100vh - 40px);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    background: #07111f;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.16);
+    box-shadow: 0 28px 90px rgba(2, 6, 23, .46);
+    overflow: hidden;
+    color: #fff;
+  }
+  .secret-gallery-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(255,255,255,.14);
+  }
+  .secret-gallery-title { font-size: 1.05rem; font-weight: 950; }
+  .secret-gallery-upload {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .secret-gallery-upload input[type=file] {
+    max-width: min(360px, 46vw);
+    color: rgba(255,255,255,.78);
+  }
+  .secret-gallery-upload button {
+    min-height: 36px;
+    border: 1px solid rgba(255,255,255,.22);
+    border-radius: 8px;
+    background: rgba(255,255,255,.1);
+    color: #fff;
+    font-weight: 900;
+    padding: 7px 11px;
+    cursor: pointer;
+  }
+  .secret-gallery-close {
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(255,255,255,.22);
+    border-radius: 8px;
+    background: rgba(255,255,255,.08);
+    color: #fff;
+    font-size: 1.35rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .secret-gallery-grid {
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    padding: 14px;
+  }
+  .secret-gallery-item {
+    position: relative;
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(255,255,255,.07);
+  }
+  .secret-gallery-item img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 9 / 16;
+    object-fit: cover;
+    background: #000;
+  }
+  .secret-gallery-name {
+    padding: 8px 9px;
+    font-size: .78rem;
+    font-weight: 850;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255,255,255,.86);
+  }
+  .secret-gallery-delete {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 34px;
+    height: 34px;
+    border: 1px solid rgba(255,255,255,.24);
+    border-radius: 8px;
+    background: rgba(2,6,23,.72);
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 950;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .secret-gallery-empty {
+    color: rgba(255,255,255,.72);
+    font-weight: 850;
+    padding: 18px;
+  }
   .login { min-height: 100vh; display: grid; place-items: center; padding: 18px; }
   .login form {
     width: min(420px, 100%);
@@ -984,6 +1128,7 @@ def logout():
 def control():
     state = read_state()
     slides = list_slides()
+    secret_images = secret_image_filenames_sorted()
     message = request.args.get("message", "")
     if "hochgeladen" in message:
         message = ""
@@ -1005,7 +1150,7 @@ def control():
         <section class="shell">
           <aside class="panel library">
             <div class="panel-head">
-              <div><div class="panel-title">Grafiken</div><div class="panel-subtitle">Ziehen zum Sortieren</div></div>
+              <div><div class="panel-title">Grafiken</div><div class="panel-subtitle secret-trigger" id="secret-gallery-trigger">Ziehen zum Sortieren</div></div>
               <span class="hint">{{ slides|length }} Dateien</span>
             </div>
             <form class="upload" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
@@ -1127,6 +1272,29 @@ def control():
             </div>
           </div>
         </section>
+        <section class="crop-modal" id="secret-gallery-modal" aria-hidden="true">
+          <div class="secret-gallery-panel">
+            <div class="secret-gallery-head">
+              <div class="secret-gallery-title">Giannis Geheime Galerie</div>
+              <form class="secret-gallery-upload" action="{{ url_for('upload_secret_gallery') }}" method="post" enctype="multipart/form-data">
+                <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.gif,image/png,image/jpeg,image/webp,image/gif" multiple required>
+                <button type="submit">Upload</button>
+              </form>
+              <button class="secret-gallery-close" id="close-secret-gallery" type="button" aria-label="Galerie schliessen">×</button>
+            </div>
+            <div class="secret-gallery-grid">
+              {% for image in secret_images %}
+              <article class="secret-gallery-item">
+                <img src="{{ url_for('secret_gallery_preview', size_name='preview', filename=image) }}" alt="" loading="lazy" decoding="async">
+                <button class="secret-gallery-delete" data-secret-delete="{{ image }}" type="button" title="Löschen">×</button>
+                <div class="secret-gallery-name">{{ image }}</div>
+              </article>
+              {% else %}
+              <div class="secret-gallery-empty">Noch keine geheimen Bilder vorhanden.</div>
+              {% endfor %}
+            </div>
+          </div>
+        </section>
         <footer class="credit">
           <a href="https://gianniborn.de">2026 Gianni Born</a>
           <span> · </span>
@@ -1158,6 +1326,9 @@ def control():
 	          const cropBox = document.getElementById("crop-box");
 	          const cropCanvas = document.getElementById("crop-canvas");
 	          const logoModal = document.getElementById("logo-modal");
+	          const secretGalleryTrigger = document.getElementById("secret-gallery-trigger");
+	          const secretGalleryModal = document.getElementById("secret-gallery-modal");
+	          const closeSecretGallery = document.getElementById("close-secret-gallery");
 	          const logoStage = document.getElementById("logo-stage");
 	          const logoPlacement = document.getElementById("logo-placement");
 	          const logoSize = document.getElementById("logo-size");
@@ -1166,6 +1337,7 @@ def control():
 	          let logoDrag = null;
 	          let logoRect = {x: logoState.x || 0.5, y: logoState.y || 0.5, w: logoState.w || 0.34};
 	          let settingsTimer = null;
+	          let secretGalleryClicks = 0;
 
 	          slideUploadInput.addEventListener("change", () => {
 	            const hasFiles = slideUploadInput.files && slideUploadInput.files.length > 0;
@@ -1250,6 +1422,14 @@ def control():
 	            logoModal.classList.remove("open");
 	            logoModal.setAttribute("aria-hidden", "true");
 	          }
+	          function openSecretGallery() {
+	            secretGalleryModal.classList.add("open");
+	            secretGalleryModal.setAttribute("aria-hidden", "false");
+	          }
+	          function closeSecretGalleryModal() {
+	            secretGalleryModal.classList.remove("open");
+	            secretGalleryModal.setAttribute("aria-hidden", "true");
+	          }
 	          async function animateProgramTransition(nextSrc = previewImage ? previewImage.src : "") {
 	            if (!programImage || !programNextImage || !nextSrc) return 0;
 	            const duration = Math.max(0, Math.min(Number.parseInt(durationInput.value, 10) || 0, 5000));
@@ -1322,6 +1502,17 @@ def control():
 	          });
 	          logoModal.addEventListener("click", (event) => {
 	            if (event.target === logoModal) closeLogoEditor();
+	          });
+	          secretGalleryTrigger.addEventListener("click", () => {
+	            secretGalleryClicks += 1;
+	            if (secretGalleryClicks >= 12) {
+	              secretGalleryClicks = 0;
+	              openSecretGallery();
+	            }
+	          });
+	          closeSecretGallery.addEventListener("click", closeSecretGalleryModal);
+	          secretGalleryModal.addEventListener("click", (event) => {
+	            if (event.target === secretGalleryModal) closeSecretGalleryModal();
 	          });
           cropBox.addEventListener("pointerdown", (event) => {
             event.preventDefault();
@@ -1405,6 +1596,20 @@ def control():
             }
             window.location.reload();
           }
+          async function deleteSecretImage(name) {
+            if (!name) return;
+            if (!window.confirm(`${name} aus der geheimen Galerie löschen?`)) return;
+            const response = await fetch("/api/secret-gallery/delete", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({filename: name, confirm: true})
+            });
+            if (!response.ok) {
+              alert("Geheimes Bild konnte nicht gelöscht werden.");
+              return;
+            }
+            window.location.reload();
+          }
           async function rotateSlide(name) {
             if (!name) return;
             const response = await fetch("/api/rotate", {
@@ -1430,6 +1635,13 @@ def control():
               event.stopPropagation();
               event.preventDefault();
               rotateSlide(button.dataset.rowRotate);
+            });
+          });
+          document.querySelectorAll("[data-secret-delete]").forEach((button) => {
+            button.addEventListener("click", (event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              deleteSecretImage(button.dataset.secretDelete);
             });
           });
           const list = document.querySelector(".slide-list");
@@ -1495,6 +1707,12 @@ def control():
               const result = await response.json().catch(() => ({}));
               const message = result.message || result.error || "Aktion abgeschlossen.";
               alert(message);
+              if (result.restarting) {
+                button.disabled = true;
+                button.textContent = "Neustart...";
+                window.setTimeout(() => window.location.reload(), 4500);
+                return;
+              }
               if (result.updated) window.location.reload();
             } catch (error) {
               alert("Aktion konnte nicht ausgefuehrt werden.");
@@ -1562,6 +1780,7 @@ def control():
         style=BASE_STYLE,
         state=state,
         slides=slides,
+        secret_images=secret_images,
         message=message,
         bg_current=BG_CURRENT,
         black_current=BLACK_CURRENT,
@@ -1867,8 +2086,14 @@ def api_git_update():
     except (OSError, subprocess.TimeoutExpired) as error:
         return jsonify({"ok": False, "error": f"Git-Update fehlgeschlagen: {error}"}), 500
 
+    restarting = False
+    if ok and updated:
+        restarting = schedule_app_restart()
+        if not restarting:
+            message += "\n\nAutomatischer App-Neustart ist in dieser Laufzeit nicht moeglich. Bitte Reboot ausfuehren."
+
     status = 200 if ok else 400
-    return jsonify({"ok": ok, "updated": updated, "message": message}), status
+    return jsonify({"ok": ok, "updated": updated, "restarting": restarting, "message": message}), status
 
 
 @app.route("/api/reboot", methods=["POST"])
@@ -1918,6 +2143,38 @@ def upload():
     return redirect(url_for("control"))
 
 
+@app.route("/upload-secret-gallery", methods=["POST"])
+@login_required
+def upload_secret_gallery():
+    uploads = [file for file in request.files.getlist("file") if file and file.filename]
+    if not uploads:
+        return redirect(url_for("control", message="Keine Datei ausgewählt."))
+
+    ensure_storage()
+    saved = []
+    skipped = []
+
+    for uploaded in uploads:
+        filename = secure_filename(uploaded.filename)
+        if not filename or not allowed_file(filename):
+            skipped.append(uploaded.filename)
+            continue
+
+        target = safe_join(str(SECRET_GALLERY_DIR), filename)
+        if not target:
+            skipped.append(uploaded.filename)
+            continue
+
+        uploaded.save(target)
+        delete_cached_previews(filename)
+        saved.append(filename)
+
+    if not saved:
+        return redirect(url_for("control", message="Keine erlaubte geheime Grafik ausgewählt."))
+
+    return redirect(url_for("control"))
+
+
 @app.route("/upload-logo", methods=["POST"])
 @login_required
 def upload_logo():
@@ -1959,6 +2216,42 @@ def slide_preview(size_name, filename):
     except (OSError, UnidentifiedImageError, ValueError):
         abort(404)
     return send_from_directory(PREVIEWS_DIR, preview.name, mimetype="image/jpeg", conditional=True, max_age=31536000)
+
+
+@app.route("/secret-gallery-previews/<size_name>/<path:filename>")
+@login_required
+def secret_gallery_preview(size_name, filename):
+    if filename != os.path.basename(filename) or not allowed_file(filename) or not secret_image_exists(filename):
+        abort(404)
+    try:
+        preview = generate_preview_file(filename, size_name, SECRET_GALLERY_DIR, "secret")
+    except (OSError, UnidentifiedImageError, ValueError):
+        abort(404)
+    return send_from_directory(PREVIEWS_DIR, preview.name, mimetype="image/jpeg", conditional=True, max_age=31536000)
+
+
+@app.route("/api/secret-gallery/delete", methods=["POST"])
+@login_required
+def api_secret_gallery_delete():
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("filename", "")
+    confirmed = payload.get("confirm") is True
+    if not confirmed:
+        return jsonify({"ok": False, "error": "confirmation required"}), 400
+    if not isinstance(requested, str) or requested != os.path.basename(requested) or not secret_image_exists(requested):
+        return jsonify({"ok": False, "error": "unknown secret image"}), 400
+
+    resolved = safe_join(str(SECRET_GALLERY_DIR), requested)
+    if not resolved:
+        return jsonify({"ok": False, "error": "invalid path"}), 400
+
+    try:
+        Path(resolved).unlink()
+        delete_cached_previews(requested)
+    except OSError:
+        return jsonify({"ok": False, "error": "delete failed"}), 400
+
+    return jsonify({"ok": True})
 
 
 @app.route("/logos/<path:filename>")
