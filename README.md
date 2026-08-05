@@ -150,9 +150,22 @@ git fetch origin <branch>
 git merge --ff-only origin/<branch>
 ```
 
-Wenn das klappt, startet direkt der neue Stand. Wenn kein Internet vorhanden
-ist, GitHub nicht erreichbar ist, `git` fehlt oder kein Fast-Forward möglich
-ist, startet die App einfach mit dem lokalen Stand weiter.
+Wenn auf dem Gerät lokale Änderungen an getrackten Dateien liegen und auf
+GitHub ein neuer Stand vorhanden ist, legt das Skript diese Änderungen vorher
+automatisch in einem Git-Stash ab. Danach startet der GitHub-Stand. Der Stash
+wird absichtlich nicht automatisch wieder eingespielt, damit alte lokale Dateien
+das Update nicht direkt wieder überschreiben.
+
+Stashes anzeigen:
+
+```bash
+git stash list
+```
+
+Wenn das Update klappt, startet direkt der neue Stand. Wenn kein Internet
+vorhanden ist, GitHub nicht erreichbar ist, `git` fehlt, lokale Änderungen nicht
+gesichert werden können oder kein Fast-Forward möglich ist, startet die App
+einfach mit dem lokalen Stand weiter.
 
 Das ist absichtlich defensiv: Ein fehlgeschlagenes Update darf den Pultbetrieb
 nicht verhindern.

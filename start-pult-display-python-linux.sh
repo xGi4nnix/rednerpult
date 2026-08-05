@@ -43,10 +43,48 @@ try_update_from_github() {
 
   echo "Pruefe GitHub auf Updates fuer Branch $branch..."
   if GIT_TERMINAL_PROMPT=0 "${timeout_cmd[@]}" git -C "$APP_DIR" fetch --quiet origin "$branch"; then
+    local local_head
+    local remote_head
+    local_head="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+    remote_head="$(git -C "$APP_DIR" rev-parse "origin/$branch" 2>/dev/null || true)"
+
+    if [[ -n "$local_head" && "$local_head" == "$remote_head" ]]; then
+      echo "Auto-Update abgeschlossen oder bereits aktuell."
+      return
+    fi
+
+    local stashed_changes=0
+    if ! git -C "$APP_DIR" diff --quiet || ! git -C "$APP_DIR" diff --cached --quiet; then
+      echo "Lokale Aenderungen gefunden. Sichere sie vor dem Update in einem Git-Stash..."
+      if GIT_AUTHOR_NAME="Rednerpult Auto-Update" \
+        GIT_AUTHOR_EMAIL="rednerpult@local" \
+        GIT_COMMITTER_NAME="Rednerpult Auto-Update" \
+        GIT_COMMITTER_EMAIL="rednerpult@local" \
+        GIT_TERMINAL_PROMPT=0 \
+        "${timeout_cmd[@]}" git -C "$APP_DIR" stash push --quiet --message "rednerpult-auto-update $(date +%Y-%m-%d_%H-%M-%S)"; then
+        stashed_changes=1
+        echo "Lokale Aenderungen gesichert. Update laeuft weiter."
+      else
+        echo "Auto-Update uebersprungen: lokale Aenderungen konnten nicht gesichert werden. Starte lokalen Stand."
+        return
+      fi
+    fi
+
     if GIT_TERMINAL_PROMPT=0 "${timeout_cmd[@]}" git -C "$APP_DIR" merge --ff-only --quiet "origin/$branch"; then
       echo "Auto-Update abgeschlossen oder bereits aktuell."
+      if [[ "$stashed_changes" == "1" ]]; then
+        echo "Hinweis: Lokale Aenderungen wurden als Git-Stash behalten und nicht wieder eingespielt."
+        echo "Bei Bedarf anzeigen mit: git stash list"
+      fi
     else
       echo "Auto-Update uebersprungen: Fast-Forward nicht moeglich. Starte lokalen Stand."
+      if [[ "$stashed_changes" == "1" ]]; then
+        echo "Stelle lokale Aenderungen wieder her..."
+        if ! git -C "$APP_DIR" stash pop --quiet >/dev/null 2>&1; then
+          echo "Lokale Aenderungen konnten nicht automatisch wiederhergestellt werden."
+          echo "Bei Bedarf manuell pruefen mit: git stash list"
+        fi
+      fi
     fi
   else
     echo "Auto-Update fehlgeschlagen oder offline. Starte lokalen Stand."
