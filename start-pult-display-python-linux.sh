@@ -55,11 +55,36 @@ try_update_from_github() {
 
 try_update_from_github
 
+hide_mouse_cursor() {
+  if [[ "${HIDE_MOUSE:-1}" != "1" ]]; then
+    echo "Mauszeiger ausblenden ist deaktiviert."
+    return
+  fi
+
+  if command -v unclutter >/dev/null 2>&1; then
+    if ! pgrep -x unclutter >/dev/null 2>&1; then
+      echo "Blende Mauszeiger mit unclutter aus..."
+      nohup unclutter -idle 0.2 -root >/dev/null 2>&1 &
+    fi
+  elif command -v unclutter-xfixes >/dev/null 2>&1; then
+    if ! pgrep -x unclutter-xfixes >/dev/null 2>&1; then
+      echo "Blende Mauszeiger mit unclutter-xfixes aus..."
+      nohup unclutter-xfixes --timeout 0.2 --hide-on-touch >/dev/null 2>&1 &
+    fi
+  else
+    echo "Mauszeiger-Ausblendung uebersprungen: unclutter ist nicht installiert."
+    echo "Optional installieren mit:"
+    echo "  sudo apt install -y unclutter"
+  fi
+}
+
+hide_mouse_cursor
+
 if ! python3 -c "import flask, PIL" >/dev/null 2>&1; then
   echo "Fehler: Flask oder Pillow ist nicht installiert."
   echo "Installiere es mit:"
   echo "  sudo apt update"
-  echo "  sudo apt install -y python3-flask python3-pil git"
+  echo "  sudo apt install -y python3-flask python3-pil git unclutter"
   exit 1
 fi
 

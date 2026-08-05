@@ -87,7 +87,7 @@ Einmalig installieren:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-flask python3-pil curl chromium git
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 ```
 
 Projekt starten:
@@ -99,7 +99,8 @@ chmod +x start-pult-display-python-linux.sh
 ```
 
 Das Startskript startet die Webapp und öffnet Chromium im Kiosk-Modus auf
-`/display`.
+`/display`. Wenn `unclutter` installiert ist, wird der Mauszeiger im
+Kiosk-Betrieb automatisch ausgeblendet.
 
 ## Autostart auf Linux
 
@@ -107,7 +108,7 @@ Wenn der Rechner automatisch in den Desktop startet:
 
 ```bash
 cd /home/mms/rednerpult
-sudo apt install -y python3-flask python3-pil curl chromium git
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 chmod +x install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 ```
@@ -126,7 +127,7 @@ Kompletter Copy-Paste-Block für die Ersteinrichtung:
 ```bash
 cd /home/mms/rednerpult
 sudo apt update
-sudo apt install -y python3-flask python3-pil curl chromium git
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 chmod +x start-pult-display-python-linux.sh install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 pkill -f /home/mms/rednerpult/app.py || true
@@ -160,6 +161,12 @@ Auto-Update deaktivieren:
 
 ```bash
 AUTO_UPDATE=0 ./start-pult-display-python-linux.sh
+```
+
+Mauszeiger-Ausblendung deaktivieren:
+
+```bash
+HIDE_MOUSE=0 ./start-pult-display-python-linux.sh
 ```
 
 Für Updates ohne Login sollte das Repository öffentlich sein oder der Rechner
