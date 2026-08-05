@@ -1,0 +1,34 @@
+# Rednerpult-Stack für Portainer (Windows 10 + Docker Desktop).
+# - rednerpult: die Flask-App aus dem GHCR-Image
+# - watchtower: pollt GHCR und deployt neue Images automatisch neu
+#
+# Secrets kommen aus .env (lokal) bzw. den Stack-Environment-Variablen (Portainer).
+services:
+  rednerpult:
+    image: ghcr.io/xgi4nnix/rednerpult:latest
+    container_name: rednerpult
+    restart: unless-stopped
+    ports:
+      - "8080:5000"          # Kiosk-Browser öffnet http://localhost:8080/display
+    environment:
+      APP_SECRET: ${APP_SECRET:?APP_SECRET fehlt}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD fehlt}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    volumes:
+      - rednerpult-data:/data
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --label-enable --cleanup --interval 300   # nur markierte Container, alle 5 Min
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+volumes:
+  rednerpult-data:

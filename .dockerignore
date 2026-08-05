@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+data/
+tmp/
+browser-profile/
+*.md
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+start-pult-display-python-linux.sh
+install-python-autostart-linux.sh
+requirements-python.txt
+windows/

@@ -1,0 +1,13 @@
+.venv/
+.venv-local/
+browser-profile/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Laufzeitdaten und Secrets nicht committen
+data/
+tmp/
+.env
+.env.*
+!.env.example
