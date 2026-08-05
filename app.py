@@ -1404,7 +1404,8 @@ def control():
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
 	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
-	          const secretGalleryAutoCloseMs = 6000;
+	          const secretGalleryAutoCloseMs = 30000;
+	          const secretGalleryGraceMs = 30000;
 	          const blackImageSrc = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 	          const logoState = {{ state.logo|tojson }};
 	          const previewImage = document.getElementById("preview-image");
@@ -1436,7 +1437,9 @@ def control():
 	          let logoRect = {x: logoState.x || 0.5, y: logoState.y || 0.5, w: logoState.w || 0.34};
 	          let settingsTimer = null;
 	          let secretGalleryClicks = 0;
+	          let secretGalleryClickResetTimer = null;
 	          let secretGalleryCloseTimer = null;
+	          let secretGalleryOpenedAt = 0;
 
 	          slideUploadInput.addEventListener("change", () => {
 	            const hasFiles = slideUploadInput.files && slideUploadInput.files.length > 0;
@@ -1524,6 +1527,7 @@ def control():
 	          function openSecretGallery() {
 	            secretGalleryModal.classList.add("open");
 	            secretGalleryModal.setAttribute("aria-hidden", "false");
+	            secretGalleryOpenedAt = Date.now();
 	            window.clearTimeout(secretGalleryCloseTimer);
 	            secretGalleryCloseTimer = window.setTimeout(closeSecretGalleryModal, secretGalleryAutoCloseMs);
 	          }
@@ -1532,6 +1536,11 @@ def control():
 	            secretGalleryCloseTimer = null;
 	            secretGalleryModal.classList.remove("open");
 	            secretGalleryModal.setAttribute("aria-hidden", "true");
+	          }
+	          function resetSecretGalleryClicks() {
+	            secretGalleryClicks = 0;
+	            window.clearTimeout(secretGalleryClickResetTimer);
+	            secretGalleryClickResetTimer = null;
 	          }
 	          function currentSettingsPayload() {
 	            return {
@@ -1630,14 +1639,18 @@ def control():
 	          });
 	          secretGalleryTrigger.addEventListener("click", () => {
 	            secretGalleryClicks += 1;
+	            window.clearTimeout(secretGalleryClickResetTimer);
+	            secretGalleryClickResetTimer = window.setTimeout(resetSecretGalleryClicks, secretGalleryGraceMs);
 	            if (secretGalleryClicks >= 12) {
-	              secretGalleryClicks = 0;
+	              resetSecretGalleryClicks();
 	              openSecretGallery();
 	            }
 	          });
 	          closeSecretGallery.addEventListener("click", closeSecretGalleryModal);
 	          secretGalleryModal.addEventListener("click", (event) => {
-	            if (event.target === secretGalleryModal) closeSecretGalleryModal();
+	            if (event.target !== secretGalleryModal) return;
+	            if (Date.now() - secretGalleryOpenedAt < secretGalleryGraceMs) return;
+	            closeSecretGalleryModal();
 	          });
           cropBox.addEventListener("pointerdown", (event) => {
             event.preventDefault();
