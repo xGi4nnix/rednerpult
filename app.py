@@ -1220,7 +1220,6 @@ def control():
     secret_images = secret_image_filenames_sorted()
     current_secret = secret_current_filename(state["current"])
     message = request.args.get("message", "")
-    open_secret_gallery = request.args.get("secret_gallery") == "open"
     if "hochgeladen" in message:
         message = ""
     return render_template_string(
@@ -1405,7 +1404,7 @@ def control():
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
 	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
-	          const openSecretGalleryOnLoad = {{ open_secret_gallery|tojson }};
+	          const secretGalleryAutoCloseMs = 6000;
 	          const blackImageSrc = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 	          const logoState = {{ state.logo|tojson }};
 	          const previewImage = document.getElementById("preview-image");
@@ -1437,6 +1436,7 @@ def control():
 	          let logoRect = {x: logoState.x || 0.5, y: logoState.y || 0.5, w: logoState.w || 0.34};
 	          let settingsTimer = null;
 	          let secretGalleryClicks = 0;
+	          let secretGalleryCloseTimer = null;
 
 	          slideUploadInput.addEventListener("change", () => {
 	            const hasFiles = slideUploadInput.files && slideUploadInput.files.length > 0;
@@ -1524,8 +1524,12 @@ def control():
 	          function openSecretGallery() {
 	            secretGalleryModal.classList.add("open");
 	            secretGalleryModal.setAttribute("aria-hidden", "false");
+	            window.clearTimeout(secretGalleryCloseTimer);
+	            secretGalleryCloseTimer = window.setTimeout(closeSecretGalleryModal, secretGalleryAutoCloseMs);
 	          }
 	          function closeSecretGalleryModal() {
+	            window.clearTimeout(secretGalleryCloseTimer);
+	            secretGalleryCloseTimer = null;
 	            secretGalleryModal.classList.remove("open");
 	            secretGalleryModal.setAttribute("aria-hidden", "true");
 	          }
@@ -1632,7 +1636,9 @@ def control():
 	            }
 	          });
 	          closeSecretGallery.addEventListener("click", closeSecretGalleryModal);
-	          if (openSecretGalleryOnLoad) openSecretGallery();
+	          secretGalleryModal.addEventListener("click", (event) => {
+	            if (event.target === secretGalleryModal) closeSecretGalleryModal();
+	          });
           cropBox.addEventListener("pointerdown", (event) => {
             event.preventDefault();
             cropBox.setPointerCapture(event.pointerId);
@@ -1947,7 +1953,6 @@ def control():
         secret_images=secret_images,
         current_secret=current_secret,
         message=message,
-        open_secret_gallery=open_secret_gallery,
         bg_current=BG_CURRENT,
         black_current=BLACK_CURRENT,
         secret_current_prefix=SECRET_CURRENT_PREFIX,
@@ -2338,7 +2343,7 @@ def upload():
 def upload_secret_gallery():
     uploads = [file for file in request.files.getlist("file") if file and file.filename]
     if not uploads:
-        return redirect(url_for("control", message="Keine Datei ausgewählt.", secret_gallery="open"))
+        return redirect(url_for("control", message="Keine Datei ausgewählt."))
 
     ensure_storage()
     saved = []
@@ -2360,9 +2365,9 @@ def upload_secret_gallery():
         saved.append(filename)
 
     if not saved:
-        return redirect(url_for("control", message="Keine erlaubte geheime Grafik ausgewählt.", secret_gallery="open"))
+        return redirect(url_for("control", message="Keine erlaubte geheime Grafik ausgewählt."))
 
-    return redirect(url_for("control", secret_gallery="open"))
+    return redirect(url_for("control"))
 
 
 @app.route("/upload-logo", methods=["POST"])
