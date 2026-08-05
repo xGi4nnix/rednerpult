@@ -1220,6 +1220,7 @@ def control():
     secret_images = secret_image_filenames_sorted()
     current_secret = secret_current_filename(state["current"])
     message = request.args.get("message", "")
+    open_secret_gallery = request.args.get("secret_gallery") == "open"
     if "hochgeladen" in message:
         message = ""
     return render_template_string(
@@ -1404,6 +1405,7 @@ def control():
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
 	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
+	          const openSecretGalleryOnLoad = {{ open_secret_gallery|tojson }};
 	          const blackImageSrc = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 	          const logoState = {{ state.logo|tojson }};
 	          const previewImage = document.getElementById("preview-image");
@@ -1630,9 +1632,7 @@ def control():
 	            }
 	          });
 	          closeSecretGallery.addEventListener("click", closeSecretGalleryModal);
-	          secretGalleryModal.addEventListener("click", (event) => {
-	            if (event.target === secretGalleryModal) closeSecretGalleryModal();
-	          });
+	          if (openSecretGalleryOnLoad) openSecretGallery();
           cropBox.addEventListener("pointerdown", (event) => {
             event.preventDefault();
             cropBox.setPointerCapture(event.pointerId);
@@ -1947,6 +1947,7 @@ def control():
         secret_images=secret_images,
         current_secret=current_secret,
         message=message,
+        open_secret_gallery=open_secret_gallery,
         bg_current=BG_CURRENT,
         black_current=BLACK_CURRENT,
         secret_current_prefix=SECRET_CURRENT_PREFIX,
@@ -2337,7 +2338,7 @@ def upload():
 def upload_secret_gallery():
     uploads = [file for file in request.files.getlist("file") if file and file.filename]
     if not uploads:
-        return redirect(url_for("control", message="Keine Datei ausgewählt."))
+        return redirect(url_for("control", message="Keine Datei ausgewählt.", secret_gallery="open"))
 
     ensure_storage()
     saved = []
@@ -2359,9 +2360,9 @@ def upload_secret_gallery():
         saved.append(filename)
 
     if not saved:
-        return redirect(url_for("control", message="Keine erlaubte geheime Grafik ausgewählt."))
+        return redirect(url_for("control", message="Keine erlaubte geheime Grafik ausgewählt.", secret_gallery="open"))
 
-    return redirect(url_for("control"))
+    return redirect(url_for("control", secret_gallery="open"))
 
 
 @app.route("/upload-logo", methods=["POST"])
