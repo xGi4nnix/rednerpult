@@ -25,6 +25,8 @@ from PIL import Image, ImageSequence, UnidentifiedImageError
 
 
 BASE_DIR = Path(__file__).resolve().parent
+START_SCRIPT = BASE_DIR / "start-pult-display-python-linux.sh"
+RESTART_LOG_FILE = BASE_DIR / "pult-restart.log"
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data")).resolve()
 SLIDES_DIR = DATA_DIR / "slides"
 LOGOS_DIR = DATA_DIR / "logos"
@@ -37,6 +39,7 @@ PREVIEW_SIZES = {"thumb": 120, "preview": 720}
 TRANSITIONS = {"cut", "fade"}
 BG_CURRENT = "__background__"
 BLACK_CURRENT = "__black__"
+SECRET_CURRENT_PREFIX = "__secret__:"
 DEFAULT_LOGO = {"filename": "", "x": 0.5, "y": 0.5, "w": 0.34}
 DEFAULT_STATE = {
     "current": "logo.png",
@@ -94,6 +97,16 @@ def secret_image_exists(filename: str) -> bool:
     return bool(resolved and Path(resolved).is_file())
 
 
+def make_secret_current(filename: str) -> str:
+    return f"{SECRET_CURRENT_PREFIX}{filename}"
+
+
+def secret_current_filename(current: str) -> str:
+    if not current.startswith(SECRET_CURRENT_PREFIX):
+        return ""
+    return current.removeprefix(SECRET_CURRENT_PREFIX)
+
+
 def read_state() -> dict:
     ensure_storage()
     try:
@@ -113,7 +126,11 @@ def read_state() -> dict:
     background = state.get("background") if isinstance(state.get("background"), str) else DEFAULT_STATE["background"]
     if background and not slide_exists(background):
         background = ""
-    if current and current not in {BG_CURRENT, BLACK_CURRENT} and not slide_exists(current):
+    secret_current = secret_current_filename(current)
+    if secret_current:
+        if not secret_image_exists(secret_current):
+            current = ""
+    elif current and current not in {BG_CURRENT, BLACK_CURRENT} and not slide_exists(current):
         current = ""
     logo = state.get("logo") if isinstance(state.get("logo"), dict) else {}
     logo_filename = logo.get("filename") if isinstance(logo.get("filename"), str) else ""
@@ -343,7 +360,33 @@ def can_restart_current_process() -> bool:
     return "gunicorn" not in executable and "gunicorn" not in argv0 and bool(sys.argv)
 
 
+def schedule_script_restart() -> bool:
+    if os.name != "posix" or not START_SCRIPT.is_file():
+        return False
+
+    env = {**os.environ, "AUTO_UPDATE": "0"}
+    command = ["bash", str(START_SCRIPT), "--restart-webapp", str(os.getpid())]
+    try:
+        with RESTART_LOG_FILE.open("ab", buffering=0) as log_file:
+            subprocess.Popen(
+                command,
+                cwd=BASE_DIR,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+    except OSError:
+        return False
+    return True
+
+
 def schedule_app_restart() -> bool:
+    if schedule_script_restart():
+        return True
+
     if not can_restart_current_process():
         return False
 
@@ -976,6 +1019,23 @@ BASE_STYLE = """
     white-space: nowrap;
     color: rgba(255,255,255,.86);
   }
+  .secret-gallery-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 0 9px 9px;
+  }
+  .secret-gallery-output {
+    min-height: 36px;
+    border: 1px solid rgba(255,255,255,.22);
+    border-radius: 8px;
+    background: #f59e0b;
+    color: #111827;
+    font-size: .82rem;
+    font-weight: 950;
+    cursor: pointer;
+  }
+  .secret-gallery-output:hover { background: #fbbf24; }
   .secret-gallery-delete {
     position: absolute;
     top: 7px;
@@ -1139,6 +1199,7 @@ def control():
     state = read_state()
     slides = list_slides()
     secret_images = secret_image_filenames_sorted()
+    current_secret = secret_current_filename(state["current"])
     message = request.args.get("message", "")
     if "hochgeladen" in message:
         message = ""
@@ -1226,6 +1287,8 @@ def control():
                       {% if state.logo.filename %}<img class="logo-overlay" src="{{ url_for('logos', filename=state.logo.filename) }}?v={{ state.version }}" alt="" style="left: {{ state.logo.x * 100 }}%; top: {{ state.logo.y * 100 }}%; width: {{ state.logo.w * 100 }}%;">{% endif %}
                     {% elif state.current == black_current %}
                       <img id="program-image" alt="">
+                    {% elif current_secret %}
+                      <img id="program-image" src="{{ url_for('secret_gallery_image', filename=current_secret) }}?v={{ state.version }}" alt="">
                     {% elif state.current %}
                       <img id="program-image" src="{{ url_for('slides', filename=state.current) }}?v={{ state.version }}" alt="">
                     {% else %}
@@ -1298,6 +1361,9 @@ def control():
                 <img src="{{ url_for('secret_gallery_preview', size_name='preview', filename=image) }}" alt="" loading="lazy" decoding="async">
                 <button class="secret-gallery-delete" data-secret-delete="{{ image }}" type="button" title="Löschen">×</button>
                 <div class="secret-gallery-name">{{ image }}</div>
+                <div class="secret-gallery-actions">
+                  <button class="secret-gallery-output" data-secret-set="{{ image }}" type="button">Ausgeben</button>
+                </div>
               </article>
               {% else %}
               <div class="secret-gallery-empty">Noch keine geheimen Bilder vorhanden.</div>
@@ -1317,6 +1383,7 @@ def control():
 	          const currentName = {{ state.current|tojson }};
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
+	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
 	          const blackImageSrc = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 	          const logoState = {{ state.logo|tojson }};
 	          const previewImage = document.getElementById("preview-image");
@@ -1642,6 +1709,14 @@ def control():
             }
             window.location.reload();
           }
+          async function outputSecretImage(name, button) {
+            if (!name) return;
+            button.disabled = true;
+            const current = `${secretCurrentPrefix}${name}`;
+            const previewSrc = `/secret-gallery/${encodeURIComponent(name)}?v=${Date.now()}`;
+            await setCurrent(current, {animate: true, previewSrc});
+            button.disabled = false;
+          }
           async function rotateSlide(name) {
             if (!name) return;
             const response = await fetch("/api/rotate", {
@@ -1674,6 +1749,13 @@ def control():
               event.stopPropagation();
               event.preventDefault();
               deleteSecretImage(button.dataset.secretDelete);
+            });
+          });
+          document.querySelectorAll("[data-secret-set]").forEach((button) => {
+            button.addEventListener("click", (event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              outputSecretImage(button.dataset.secretSet, button);
             });
           });
           const list = document.querySelector(".slide-list");
@@ -1732,6 +1814,7 @@ def control():
           async function runAdminAction(button, url, confirmText, workingText) {
             if (!window.confirm(confirmText)) return;
             const originalText = button.textContent;
+            let keepDisabled = false;
             button.disabled = true;
             button.textContent = workingText;
             try {
@@ -1740,6 +1823,7 @@ def control():
               const message = result.message || result.error || "Aktion abgeschlossen.";
               alert(message);
               if (result.restarting) {
+                keepDisabled = true;
                 button.disabled = true;
                 button.textContent = "Neustart...";
                 window.setTimeout(() => window.location.reload(), 4500);
@@ -1749,8 +1833,10 @@ def control():
             } catch (error) {
               alert("Aktion konnte nicht ausgefuehrt werden.");
             } finally {
-              button.disabled = false;
-              button.textContent = originalText;
+              if (!keepDisabled) {
+                button.disabled = false;
+                button.textContent = originalText;
+              }
             }
           }
           gitUpdateButton.addEventListener("click", () => {
@@ -1813,9 +1899,11 @@ def control():
         state=state,
         slides=slides,
         secret_images=secret_images,
+        current_secret=current_secret,
         message=message,
         bg_current=BG_CURRENT,
         black_current=BLACK_CURRENT,
+        secret_current_prefix=SECRET_CURRENT_PREFIX,
     )
 
 
@@ -1871,6 +1959,18 @@ def display():
           return new Promise((resolve) => {
             bg.onload = () => resolve(true);
             bg.onerror = () => resolve(false);
+          });
+        }
+        if (state.current.startsWith("__secret__:")) {
+          const filename = state.current.slice("__secret__:".length);
+          const img = new Image();
+          img.className = "slide-img";
+          img.alt = "";
+          img.src = `/secret-gallery/${encodeURIComponent(filename)}?v=${state.version}`;
+          scene.appendChild(img);
+          return new Promise((resolve) => {
+            img.onload = () => resolve(true);
+            img.onerror = () => resolve(false);
           });
         }
         const img = new Image();
@@ -1937,11 +2037,15 @@ def api_current():
     payload = request.get_json(silent=True) or {}
     requested = payload.get("current", "")
     state = read_state()
+    secret_requested = secret_current_filename(requested) if isinstance(requested, str) else ""
     if requested == BLACK_CURRENT:
         pass
     elif requested == BG_CURRENT:
         if not state["background"]:
             return jsonify({"ok": False, "error": "background missing"}), 400
+    elif secret_requested:
+        if not secret_image_exists(secret_requested):
+            return jsonify({"ok": False, "error": "unknown secret image"}), 400
     elif not isinstance(requested, str) or requested != os.path.basename(requested) or not slide_exists(requested):
         return jsonify({"ok": False, "error": "unknown slide"}), 400
 
@@ -2124,10 +2228,12 @@ def api_git_update():
         return jsonify({"ok": False, "error": f"Git-Update fehlgeschlagen: {error}"}), 500
 
     restarting = False
-    if ok and updated:
+    if ok:
         restarting = schedule_app_restart()
         if not restarting:
             message += "\n\nAutomatischer App-Neustart ist in dieser Laufzeit nicht moeglich. Bitte Reboot ausfuehren."
+        elif not updated:
+            message += "\n\nDie App startet jetzt neu."
 
     status = 200 if ok else 400
     return jsonify({"ok": ok, "updated": updated, "restarting": restarting, "message": message}), status
@@ -2243,6 +2349,13 @@ def slides(filename):
     return send_from_directory(SLIDES_DIR, filename, conditional=True)
 
 
+@app.route("/secret-gallery/<path:filename>")
+def secret_gallery_image(filename):
+    if filename != os.path.basename(filename) or not allowed_file(filename) or not secret_image_exists(filename):
+        abort(404)
+    return send_from_directory(SECRET_GALLERY_DIR, filename, conditional=True)
+
+
 @app.route("/previews/<size_name>/<path:filename>")
 @login_required
 def slide_preview(size_name, filename):
@@ -2278,6 +2391,7 @@ def api_secret_gallery_delete():
     if not isinstance(requested, str) or requested != os.path.basename(requested) or not secret_image_exists(requested):
         return jsonify({"ok": False, "error": "unknown secret image"}), 400
 
+    state = read_state()
     resolved = safe_join(str(SECRET_GALLERY_DIR), requested)
     if not resolved:
         return jsonify({"ok": False, "error": "invalid path"}), 400
@@ -2287,6 +2401,9 @@ def api_secret_gallery_delete():
         delete_cached_previews(requested)
     except OSError:
         return jsonify({"ok": False, "error": "delete failed"}), 400
+
+    if state["current"] == make_secret_current(requested):
+        write_state({**state, "current": "", "version": state["version"] + 1})
 
     return jsonify({"ok": True})
 
