@@ -599,6 +599,9 @@ BASE_STYLE = """
     font-size: .72rem;
     font-weight: 800;
     pointer-events: auto;
+  }
+  .credit a {
+    color: inherit;
     text-decoration: none;
   }
   .crop-modal {
@@ -780,7 +783,11 @@ BASE_STYLE = """
     }
     .slide-tools { gap: 6px; }
     .slide-meta { font-size: .76rem; }
-    .credit { display: none; }
+    .credit {
+      right: 10px;
+      bottom: 6px;
+      font-size: .66rem;
+    }
   }
 </style>
 """
@@ -965,7 +972,11 @@ def control():
             </div>
           </div>
         </section>
-        <a class="credit" href="https://gianniborn.de">2026 Gianni Born</a>
+        <footer class="credit">
+          <a href="https://gianniborn.de">2026 Gianni Born</a>
+          <span> · </span>
+          <a href="https://github.com/xGi4nnix/rednerpult">GitHub</a>
+        </footer>
         </main>
         <script>
 	          let selectedName = {{ selected|tojson }};
