@@ -428,6 +428,16 @@ def crop_slide_file(filename: str, crop: dict) -> None:
         raise
 
 
+def settings_from_payload(payload: dict, state: dict) -> tuple[str, int]:
+    transition = payload.get("transition", state["transition"])
+    duration = payload.get("duration", state["duration"])
+    if transition not in TRANSITIONS:
+        raise ValueError("unknown transition")
+    if not isinstance(duration, int):
+        raise TypeError("invalid duration")
+    return transition, min(max(duration, 0), 5000)
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -1430,6 +1440,12 @@ def control():
 	            secretGalleryModal.classList.remove("open");
 	            secretGalleryModal.setAttribute("aria-hidden", "true");
 	          }
+	          function currentSettingsPayload() {
+	            return {
+	              transition,
+	              duration: Number.parseInt(durationInput.value, 10)
+	            };
+	          }
 	          async function animateProgramTransition(nextSrc = previewImage ? previewImage.src : "") {
 	            if (!programImage || !programNextImage || !nextSrc) return 0;
 	            const duration = Math.max(0, Math.min(Number.parseInt(durationInput.value, 10) || 0, 5000));
@@ -1453,17 +1469,32 @@ def control():
 	            return fadeMs;
 	          }
 	          async function setCurrent(name, options = {}) {
-	            const animationMs = options.animate ? await animateProgramTransition(options.previewSrc) : 0;
-	            const response = await fetch("/api/current", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({current: name})
-            });
-            if (!response.ok) {
-              alert("Grafik konnte nicht gesetzt werden.");
-              return;
-            }
+	            window.clearTimeout(settingsTimer);
+	            setSettingsStatus("Wird gespeichert...");
+	            const responsePromise = fetch("/api/current", {
+	              method: "POST",
+	              headers: {"Content-Type": "application/json"},
+	              body: JSON.stringify({current: name, ...currentSettingsPayload()})
+	            });
+	            const animationPromise = options.animate ? animateProgramTransition(options.previewSrc) : Promise.resolve(0);
+
+	            let response;
+	            try {
+	              response = await responsePromise;
+	            } catch (error) {
+	              setSettingsStatus("Speichern fehlgeschlagen", true);
+	              alert("Grafik konnte nicht gesetzt werden.");
+	              return false;
+	            }
+	            if (!response.ok) {
+	              setSettingsStatus("Speichern fehlgeschlagen", true);
+	              alert("Grafik konnte nicht gesetzt werden.");
+	              return false;
+	            }
+	            setSettingsStatus("Gespeichert");
+	            const animationMs = await animationPromise;
 	            window.setTimeout(() => window.location.reload(), animationMs + 120);
+	            return true;
 	          }
 	          async function setBackground(name) {
 	            if (!name || name === bgCurrent) return;
@@ -1481,18 +1512,19 @@ def control():
           document.querySelectorAll("[data-set]").forEach((button) => {
             button.addEventListener("click", async () => {
               button.disabled = true;
-              const saved = await saveSettings(false);
               const previewSrc = button.dataset.set === blackCurrent ? blackImageSrc : `/slides/${encodeURIComponent(button.dataset.set)}?v=${Date.now()}`;
-              if (saved) await setCurrent(button.dataset.set, {animate: true, previewSrc});
+              await setCurrent(button.dataset.set, {animate: true, previewSrc});
               button.disabled = false;
             });
           });
-          document.getElementById("take-slide").addEventListener("click", async () => {
+          const takeSlideButton = document.getElementById("take-slide");
+          takeSlideButton.addEventListener("click", async () => {
             if (!selectedName) return;
-            const saved = await saveSettings(false);
+            takeSlideButton.disabled = true;
             const row = selectedRow();
             const previewSrc = row && row.dataset.src ? row.dataset.src : previewImage.src;
-            if (saved) setCurrent(selectedName, {animate: true, previewSrc});
+            await setCurrent(selectedName, {animate: true, previewSrc});
+            takeSlideButton.disabled = false;
           });
 	          document.getElementById("open-crop").addEventListener("click", openCropEditor);
 	          document.getElementById("cancel-crop").addEventListener("click", closeCropEditor);
@@ -1824,7 +1856,7 @@ def display():
           const bg = new Image();
           bg.className = "bg-img";
           bg.alt = "";
-          bg.src = `/slides/${encodeURIComponent(state.background)}?v=${state.version}&t=${Date.now()}`;
+          bg.src = `/slides/${encodeURIComponent(state.background)}?v=${state.version}`;
           scene.appendChild(bg);
           if (state.logo && state.logo.filename) {
             const logo = new Image();
@@ -1833,7 +1865,7 @@ def display():
             logo.style.left = `${(state.logo.x || 0.5) * 100}%`;
             logo.style.top = `${(state.logo.y || 0.5) * 100}%`;
             logo.style.width = `${(state.logo.w || 0.34) * 100}vw`;
-            logo.src = `/logos/${encodeURIComponent(state.logo.filename)}?v=${state.version}&t=${Date.now()}`;
+            logo.src = `/logos/${encodeURIComponent(state.logo.filename)}?v=${state.version}`;
             scene.appendChild(logo);
           }
           return new Promise((resolve) => {
@@ -1844,7 +1876,7 @@ def display():
         const img = new Image();
         img.className = "slide-img";
         img.alt = "";
-        img.src = `/slides/${encodeURIComponent(state.current)}?v=${state.version}&t=${Date.now()}`;
+        img.src = `/slides/${encodeURIComponent(state.current)}?v=${state.version}`;
         scene.appendChild(img);
         return new Promise((resolve) => {
           img.onload = () => resolve(true);
@@ -1890,7 +1922,7 @@ def display():
         } catch (error) {}
       }
       tick();
-      setInterval(tick, 400);
+      setInterval(tick, 200);
     </script></body></html>"""
 
 
@@ -1913,8 +1945,15 @@ def api_current():
     elif not isinstance(requested, str) or requested != os.path.basename(requested) or not slide_exists(requested):
         return jsonify({"ok": False, "error": "unknown slide"}), 400
 
+    try:
+        transition, duration = settings_from_payload(payload, state)
+    except ValueError:
+        return jsonify({"ok": False, "error": "unknown transition"}), 400
+    except TypeError:
+        return jsonify({"ok": False, "error": "invalid duration"}), 400
+
     version = state["version"] + 1
-    new_state = {**state, "current": requested, "version": version}
+    new_state = {**state, "current": requested, "transition": transition, "duration": duration, "version": version}
     write_state(new_state)
     return jsonify({"ok": True, **new_state})
 
@@ -1964,20 +2003,18 @@ def api_logo_position():
 @login_required
 def api_settings():
     payload = request.get_json(silent=True) or {}
-    transition = payload.get("transition")
-    duration = payload.get("duration")
-
-    if transition not in TRANSITIONS:
+    state = read_state()
+    try:
+        transition, duration = settings_from_payload(payload, state)
+    except ValueError:
         return jsonify({"ok": False, "error": "unknown transition"}), 400
-    if not isinstance(duration, int):
+    except TypeError:
         return jsonify({"ok": False, "error": "invalid duration"}), 400
 
-    state = read_state()
     new_state = {
         **state,
         "transition": transition,
-        "duration": min(max(duration, 0), 5000),
-        "version": state["version"] + 1,
+        "duration": duration,
     }
     write_state(new_state)
     return jsonify({"ok": True, **new_state})
