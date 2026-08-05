@@ -196,8 +196,9 @@ In `/control` gibt es oben rechts zwei Admin-Aktionen:
 
 - `Update` zieht den aktuellen Branch aus dem GitHub-Repository. Die Logik ist
   dieselbe wie beim Start: `git fetch`, lokale Änderungen bei Bedarf in einen
-  Stash sichern, dann `git merge --ff-only`. Wenn sich der Code geändert hat,
-  startet die laufende Python-App danach automatisch neu.
+  Stash sichern, dann `git merge --ff-only`. Nach einem erfolgreichen Update-Lauf
+  beendet das Startskript die laufende Webapp und startet sie neu, auch wenn der
+  Branch bereits aktuell war.
 - `Reboot` fordert einen Neustart des Pult-PCs an.
 
 Wenn der automatische App-Neustart nicht möglich ist, zum Beispiel unter einer

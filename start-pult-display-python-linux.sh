@@ -13,6 +13,63 @@ export APP_SECRET="${APP_SECRET:-pult-display-local-secret}"
 export ADMIN_USER="${ADMIN_USER:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 
+RESTART_WEBAPP_ONLY=0
+RESTART_OLD_PID="${2:-}"
+if [[ "${1:-}" == "--restart-webapp" ]]; then
+  RESTART_WEBAPP_ONLY=1
+fi
+
+webapp_pids() {
+  pgrep -f "$APP_DIR/app.py"
+}
+
+start_webapp() {
+  if ! webapp_pids >/dev/null; then
+    echo "Starte Pult Display Webapp..."
+    nohup python3 "$APP_DIR/app.py" > "$LOG_FILE" 2>&1 &
+  else
+    echo "Pult Display Webapp laeuft bereits."
+  fi
+}
+
+wait_for_webapp() {
+  echo "Warte auf Webapp..."
+  for _ in $(seq 1 60); do
+    if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+
+  echo "Fehler: Webapp ist nicht erreichbar: $HEALTH_URL"
+  echo "Logdatei:"
+  echo "$LOG_FILE"
+  exit 1
+}
+
+restart_webapp() {
+  echo "Starte Pult Display Webapp neu..."
+
+  if [[ "$RESTART_OLD_PID" =~ ^[0-9]+$ ]]; then
+    kill "$RESTART_OLD_PID" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if ! kill -0 "$RESTART_OLD_PID" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.2
+    done
+    kill -KILL "$RESTART_OLD_PID" >/dev/null 2>&1 || true
+  else
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
+    done < <(webapp_pids || true)
+    sleep 1
+  fi
+
+  start_webapp
+  wait_for_webapp
+}
+
 try_update_from_github() {
   if [[ "${AUTO_UPDATE:-1}" != "1" ]]; then
     echo "Auto-Update ist deaktiviert."
@@ -91,6 +148,11 @@ try_update_from_github() {
   fi
 }
 
+if [[ "$RESTART_WEBAPP_ONLY" == "1" ]]; then
+  restart_webapp
+  exit 0
+fi
+
 try_update_from_github
 
 hide_mouse_cursor() {
@@ -126,27 +188,8 @@ if ! python3 -c "import flask, PIL" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! pgrep -f "$APP_DIR/app.py" >/dev/null 2>&1; then
-  echo "Starte Pult Display Webapp..."
-  nohup python3 "$APP_DIR/app.py" > "$LOG_FILE" 2>&1 &
-else
-  echo "Pult Display Webapp laeuft bereits."
-fi
-
-echo "Warte auf Webapp..."
-for _ in $(seq 1 60); do
-  if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-  echo "Fehler: Webapp ist nicht erreichbar: $HEALTH_URL"
-  echo "Logdatei:"
-  echo "$LOG_FILE"
-  exit 1
-fi
+start_webapp
+wait_for_webapp
 
 if command -v chromium >/dev/null 2>&1; then
   BROWSER="chromium"
