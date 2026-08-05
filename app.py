@@ -1,6 +1,9 @@
 import json
 import os
+import subprocess
 import tempfile
+import threading
+import time
 from functools import wraps
 from pathlib import Path
 
@@ -243,6 +246,95 @@ def delete_cached_previews(filename: str) -> None:
         cached.unlink(missing_ok=True)
 
 
+def run_command(command: list[str], timeout: int = 25) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": "Rednerpult Web-Update",
+        "GIT_AUTHOR_EMAIL": "rednerpult@local",
+        "GIT_COMMITTER_NAME": "Rednerpult Web-Update",
+        "GIT_COMMITTER_EMAIL": "rednerpult@local",
+    }
+    return subprocess.run(
+        command,
+        cwd=BASE_DIR,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def command_output(result: subprocess.CompletedProcess) -> str:
+    return (result.stdout or "").strip()
+
+
+def run_git_update() -> tuple[bool, str, bool]:
+    if not (BASE_DIR / ".git").is_dir():
+        return False, "Kein Git-Checkout gefunden.", False
+
+    branch_result = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+    branch = command_output(branch_result)
+    if branch_result.returncode != 0 or not branch or branch == "HEAD":
+        return False, "Update nicht moeglich: kein Branch ausgecheckt.", False
+
+    local_before = command_output(run_command(["git", "rev-parse", "HEAD"], timeout=5))
+    fetch = run_command(["git", "fetch", "--quiet", "origin", branch], timeout=30)
+    if fetch.returncode != 0:
+        return False, f"Git fetch fehlgeschlagen oder offline.\n\n{command_output(fetch)}", False
+
+    remote = command_output(run_command(["git", "rev-parse", f"origin/{branch}"], timeout=5))
+    if local_before and remote and local_before == remote:
+        return True, f"Schon aktuell auf Branch {branch}.", False
+
+    stashed_changes = False
+    dirty = run_command(["git", "diff", "--quiet"], timeout=5).returncode != 0
+    staged = run_command(["git", "diff", "--cached", "--quiet"], timeout=5).returncode != 0
+    if dirty or staged:
+        stash = run_command(
+            ["git", "stash", "push", "--quiet", "--message", f"rednerpult-web-update {time.strftime('%Y-%m-%d_%H-%M-%S')}"],
+            timeout=25,
+        )
+        if stash.returncode != 0:
+            return False, f"Lokale Aenderungen konnten nicht gesichert werden.\n\n{command_output(stash)}", False
+        stashed_changes = True
+
+    merge = run_command(["git", "merge", "--ff-only", "--quiet", f"origin/{branch}"], timeout=30)
+    if merge.returncode != 0:
+        if stashed_changes:
+            run_command(["git", "stash", "pop", "--quiet"], timeout=25)
+        return False, f"Update nicht moeglich: Fast-Forward fehlgeschlagen.\n\n{command_output(merge)}", False
+
+    local_after = command_output(run_command(["git", "rev-parse", "HEAD"], timeout=5))
+    message = f"Update erfolgreich auf Branch {branch}."
+    if stashed_changes:
+        message += "\n\nLokale Aenderungen wurden als Git-Stash behalten."
+    if local_after and local_before and local_after != local_before:
+        message += "\n\nFalls App-Code aktualisiert wurde, bitte danach rebooten."
+    return True, message, local_after != local_before
+
+
+def schedule_reboot() -> None:
+    def reboot_later() -> None:
+        time.sleep(1)
+        commands = [
+            ["systemctl", "reboot"],
+            ["sudo", "-n", "reboot"],
+            ["sudo", "-n", "shutdown", "-r", "now"],
+        ]
+        for command in commands:
+            try:
+                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                return
+
+    threading.Thread(target=reboot_later, daemon=True).start()
+
+
 def crop_slide_file(filename: str, crop: dict) -> None:
     resolved = safe_join(str(SLIDES_DIR), filename)
     if not resolved:
@@ -357,6 +449,12 @@ BASE_STYLE = """
     font-size: .88rem;
     font-weight: 950;
   }
+  .admin-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .connection-dot {
     width: 10px;
     height: 10px;
@@ -420,6 +518,9 @@ BASE_STYLE = """
   .button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
   .button.primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
   .button.blank { background: #101828; border-color: #101828; color: #fff; }
+  .button.compact { min-height: 38px; padding: 8px 11px; font-size: .84rem; }
+  .button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .button.danger:hover { background: #b42318; border-color: #b42318; }
   .upload {
     display: flex;
     align-items: center;
@@ -890,6 +991,10 @@ def control():
         """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Steuerung</title>{{ style|safe }}</head>
         <body><main class="page">
         <header class="topbar">
+          <div class="admin-actions">
+            <button class="button compact" id="git-update" type="button">Update</button>
+            <button class="button compact danger" id="system-reboot" type="button">Reboot</button>
+          </div>
           <div class="connection-status" id="connection-status" role="status" aria-live="polite">
             <span class="connection-dot" aria-hidden="true"></span>
             <span id="connection-text">Verbindung Okay</span>
@@ -1046,6 +1151,8 @@ def control():
 	          const connectionText = document.getElementById("connection-text");
 	          const slideUploadInput = document.getElementById("slide-upload-input");
 	          const slideUploadSubmit = document.getElementById("slide-upload-submit");
+	          const gitUpdateButton = document.getElementById("git-update");
+	          const systemRebootButton = document.getElementById("system-reboot");
 	          const cropModal = document.getElementById("crop-modal");
 	          const cropImage = document.getElementById("crop-image");
 	          const cropBox = document.getElementById("crop-box");
@@ -1378,6 +1485,40 @@ def control():
             });
           });
           durationInput.addEventListener("input", queueSaveSettings);
+          async function runAdminAction(button, url, confirmText, workingText) {
+            if (!window.confirm(confirmText)) return;
+            const originalText = button.textContent;
+            button.disabled = true;
+            button.textContent = workingText;
+            try {
+              const response = await fetch(url, {method: "POST"});
+              const result = await response.json().catch(() => ({}));
+              const message = result.message || result.error || "Aktion abgeschlossen.";
+              alert(message);
+              if (result.updated) window.location.reload();
+            } catch (error) {
+              alert("Aktion konnte nicht ausgefuehrt werden.");
+            } finally {
+              button.disabled = false;
+              button.textContent = originalText;
+            }
+          }
+          gitUpdateButton.addEventListener("click", () => {
+            runAdminAction(
+              gitUpdateButton,
+              "/api/git-update",
+              "Git-Update vom aktuellen Branch ziehen?",
+              "Update..."
+            );
+          });
+          systemRebootButton.addEventListener("click", () => {
+            runAdminAction(
+              systemRebootButton,
+              "/api/reboot",
+              "Rednerpult-PC wirklich neu starten?",
+              "Reboot..."
+            );
+          });
           async function saveSettings(reload = true) {
             window.clearTimeout(settingsTimer);
             const duration = Number.parseInt(durationInput.value, 10);
@@ -1716,6 +1857,28 @@ def api_order():
     new_state = {**state, "order": order}
     write_state(new_state)
     return jsonify({"ok": True, **new_state})
+
+
+@app.route("/api/git-update", methods=["POST"])
+@login_required
+def api_git_update():
+    try:
+        ok, message, updated = run_git_update()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return jsonify({"ok": False, "error": f"Git-Update fehlgeschlagen: {error}"}), 500
+
+    status = 200 if ok else 400
+    return jsonify({"ok": ok, "updated": updated, "message": message}), status
+
+
+@app.route("/api/reboot", methods=["POST"])
+@login_required
+def api_reboot():
+    schedule_reboot()
+    return jsonify({
+        "ok": True,
+        "message": "Reboot wurde angefordert. Wenn der PC nicht neu startet, braucht der App-User sudo-Rechte fuer reboot.",
+    })
 
 
 @app.route("/upload", methods=["POST"])

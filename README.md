@@ -190,6 +190,29 @@ Auto-Update deaktivieren:
 AUTO_UPDATE=0 ./start-pult-display-python-linux.sh
 ```
 
+## Update und Reboot aus dem Webinterface
+
+In `/control` gibt es oben rechts zwei Admin-Aktionen:
+
+- `Update` zieht den aktuellen Branch aus dem GitHub-Repository. Die Logik ist
+  dieselbe wie beim Start: `git fetch`, lokale Änderungen bei Bedarf in einen
+  Stash sichern, dann `git merge --ff-only`.
+- `Reboot` fordert einen Neustart des Pult-PCs an.
+
+Wenn durch `Update` App-Code geändert wurde, danach einmal `Reboot` ausführen,
+damit die laufende Python-App mit dem neuen Stand startet.
+
+Der Reboot-Button braucht auf Linux passende Rechte für den User, unter dem die
+Webapp läuft. Falls der PC nicht neu startet, kann man für den Pult-User zum
+Beispiel eine sudoers-Datei anlegen:
+
+```bash
+REBOOT_CMD="$(command -v reboot)"
+SHUTDOWN_CMD="$(command -v shutdown)"
+echo "$USER ALL=(root) NOPASSWD: $REBOOT_CMD, $SHUTDOWN_CMD" | sudo tee /etc/sudoers.d/rednerpult-reboot
+sudo chmod 440 /etc/sudoers.d/rednerpult-reboot
+```
+
 Mauszeiger-Ausblendung deaktivieren:
 
 ```bash
