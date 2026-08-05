@@ -113,14 +113,28 @@ chmod +x install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 ```
 
-Das legt diese Datei an:
+Beim nächsten Desktop-Login startet die App automatisch und öffnet das Display
+im Kiosk-Modus. Der Installer trägt den Start in die X-Session ein und legt
+einen kleinen Launcher mit Logdatei an:
 
 ```text
-/home/mms/.config/autostart/pult-display.desktop
+/home/mms/.xsessionrc
+/home/mms/rednerpult/pult-autostart-launcher.sh
+/home/mms/rednerpult/pult-autostart.log
 ```
 
-Beim nächsten Desktop-Login startet die App automatisch und öffnet das Display
-im Kiosk-Modus.
+Eine alte Desktop-Autostart-Datei unter
+`/home/mms/.config/autostart/pult-display.desktop` wird dabei entfernt.
+
+Nach einem Reboot kann man prüfen, ob der Autostart überhaupt ausgelöst wurde:
+
+```bash
+cat ~/rednerpult/pult-autostart.log
+```
+
+Wichtig: Dieser Autostart läuft erst nach dem grafischen Login. Wenn der Rechner
+nach dem Reboot am Login-Bildschirm stehen bleibt, muss in MX Linux noch
+automatische Anmeldung aktiviert werden.
 
 Kompletter Copy-Paste-Block für die Ersteinrichtung:
 
