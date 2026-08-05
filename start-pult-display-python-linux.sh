@@ -13,11 +13,53 @@ export APP_SECRET="${APP_SECRET:-pult-display-local-secret}"
 export ADMIN_USER="${ADMIN_USER:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 
+try_update_from_github() {
+  if [[ "${AUTO_UPDATE:-1}" != "1" ]]; then
+    echo "Auto-Update ist deaktiviert."
+    return
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Auto-Update uebersprungen: git ist nicht installiert."
+    return
+  fi
+
+  if [[ ! -d "$APP_DIR/.git" ]]; then
+    echo "Auto-Update uebersprungen: kein Git-Checkout."
+    return
+  fi
+
+  local branch
+  branch="$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+    echo "Auto-Update uebersprungen: kein Branch ausgecheckt."
+    return
+  fi
+
+  local timeout_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout 25)
+  fi
+
+  echo "Pruefe GitHub auf Updates fuer Branch $branch..."
+  if GIT_TERMINAL_PROMPT=0 "${timeout_cmd[@]}" git -C "$APP_DIR" fetch --quiet origin "$branch"; then
+    if GIT_TERMINAL_PROMPT=0 "${timeout_cmd[@]}" git -C "$APP_DIR" merge --ff-only --quiet "origin/$branch"; then
+      echo "Auto-Update abgeschlossen oder bereits aktuell."
+    else
+      echo "Auto-Update uebersprungen: Fast-Forward nicht moeglich. Starte lokalen Stand."
+    fi
+  else
+    echo "Auto-Update fehlgeschlagen oder offline. Starte lokalen Stand."
+  fi
+}
+
+try_update_from_github
+
 if ! python3 -c "import flask, PIL" >/dev/null 2>&1; then
   echo "Fehler: Flask oder Pillow ist nicht installiert."
   echo "Installiere es mit:"
   echo "  sudo apt update"
-  echo "  sudo apt install -y python3-flask python3-pil"
+  echo "  sudo apt install -y python3-flask python3-pil git"
   exit 1
 fi
 
