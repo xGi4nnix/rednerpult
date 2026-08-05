@@ -13,7 +13,7 @@ cat > "$DESKTOP_FILE" <<EOF
 Type=Application
 Name=Pult Display
 Comment=Startet Pult Display lokal mit Python
-Exec=$APP_DIR/start-pult-display-python-linux.sh
+Exec=bash $APP_DIR/start-pult-display-python-linux.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
