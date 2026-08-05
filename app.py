@@ -24,9 +24,11 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data")).resolve()
 SLIDES_DIR = DATA_DIR / "slides"
 LOGOS_DIR = DATA_DIR / "logos"
+PREVIEWS_DIR = DATA_DIR / "previews"
 STATE_FILE = DATA_DIR / "state.json"
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+PREVIEW_SIZES = {"thumb": 120, "preview": 720}
 TRANSITIONS = {"cut", "fade"}
 BG_CURRENT = "__background__"
 BLACK_CURRENT = "__black__"
@@ -50,6 +52,7 @@ def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SLIDES_DIR.mkdir(parents=True, exist_ok=True)
     LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
         STATE_FILE.write_text(json.dumps(DEFAULT_STATE, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 
@@ -191,6 +194,53 @@ def save_image_like_original(image: Image.Image, target: Path, tmp_path: Path) -
     elif suffix == ".png":
         save_kwargs = {"optimize": True}
     image.save(tmp_path, **save_kwargs)
+
+
+def preview_filename(filename: str, size_name: str) -> str:
+    source = SLIDES_DIR / filename
+    mtime_ns = source.stat().st_mtime_ns
+    return f"{Path(filename).stem}-{mtime_ns}-{size_name}.jpg"
+
+
+def generate_preview_file(filename: str, size_name: str) -> Path:
+    if size_name not in PREVIEW_SIZES:
+        raise ValueError("invalid preview size")
+
+    resolved = safe_join(str(SLIDES_DIR), filename)
+    if not resolved:
+        raise ValueError("invalid path")
+
+    target_name = preview_filename(filename, size_name)
+    target = PREVIEWS_DIR / target_name
+    if target.exists():
+        return target
+
+    width = PREVIEW_SIZES[size_name]
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{Path(filename).stem}-{size_name}-", suffix=".jpg", dir=PREVIEWS_DIR)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    try:
+        with Image.open(resolved) as image:
+            if getattr(image, "is_animated", False):
+                image.seek(0)
+            image = image.convert("RGB")
+            ratio = width / image.width
+            height = max(1, int(round(image.height * ratio)))
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+            image.save(tmp_path, "JPEG", quality=82, optimize=True, progressive=True)
+        os.replace(tmp_path, target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return target
+
+
+def delete_cached_previews(filename: str) -> None:
+    stem = Path(filename).stem
+    for cached in PREVIEWS_DIR.glob(f"{stem}-*.jpg"):
+        cached.unlink(missing_ok=True)
 
 
 def crop_slide_file(filename: str, crop: dict) -> None:
@@ -858,16 +908,16 @@ def control():
               <button id="slide-upload-submit" type="submit" hidden disabled>Upload</button>
             </form>
             <section class="slide-list" aria-label="Grafiken">
-              <article class="slide-row bg-row {% if state.current == bg_current %}active{% endif %} {% if selected == bg_current %}selected{% endif %}" data-slide="{{ bg_current }}" data-bg="1" data-src="{% if state.background %}{{ url_for('slides', filename=state.background) }}?v={{ state.version }}{% endif %}" role="button" tabindex="0">
-                {% if state.background %}<img class="thumb" src="{{ url_for('slides', filename=state.background) }}?v={{ state.version }}" alt="">{% else %}<span class="thumb">BG</span>{% endif %}
+              <article class="slide-row bg-row {% if state.current == bg_current %}active{% endif %} {% if selected == bg_current %}selected{% endif %}" data-slide="{{ bg_current }}" data-bg="1" data-src="{% if state.background %}{{ url_for('slides', filename=state.background) }}?v={{ state.version }}{% endif %}" data-preview-src="{% if state.background %}{{ url_for('slide_preview', size_name='preview', filename=state.background) }}{% endif %}" role="button" tabindex="0">
+                {% if state.background %}<img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=state.background) }}" alt="" loading="lazy" decoding="async">{% else %}<span class="thumb">BG</span>{% endif %}
                 <span class="slide-name">bg</span>
                 <span class="slide-tools">
                   <span class="slide-meta {% if state.current == bg_current %}live{% endif %}">{% if state.current == bg_current %}Live{% else %}Bereit{% endif %}</span>
                 </span>
               </article>
               {% for slide in slides %}
-              <article class="slide-row {% if slide == state.current %}active{% endif %} {% if slide == selected %}selected{% endif %}" draggable="true" data-slide="{{ slide }}" data-src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" role="button" tabindex="0">
-                <img class="thumb" src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" alt="">
+              <article class="slide-row {% if slide == state.current %}active{% endif %} {% if slide == selected %}selected{% endif %}" draggable="true" data-slide="{{ slide }}" data-src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" data-preview-src="{{ url_for('slide_preview', size_name='preview', filename=slide) }}" role="button" tabindex="0">
+                <img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=slide) }}" alt="" loading="lazy" decoding="async">
                 <span class="slide-name">{{ slide }}</span>
                 <span class="slide-tools">
                   <span class="slide-meta {% if slide == state.current %}live{% endif %}">{% if slide == state.current %}Live{% else %}Bereit{% endif %}</span>
@@ -885,7 +935,7 @@ def control():
                 <div class="monitor-label">Preview</div>
                 <div class="monitor-stage">
                   <div class="monitor-frame">
-                    {% if selected == bg_current and state.background %}<img id="preview-image" src="{{ url_for('slides', filename=state.background) }}?v={{ state.version }}" alt="">{% elif selected and selected != bg_current %}<img id="preview-image" src="{{ url_for('slides', filename=selected) }}?v={{ state.version }}" alt="">{% else %}<img id="preview-image" alt="">{% endif %}
+                    {% if selected == bg_current and state.background %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=state.background) }}" alt="">{% elif selected and selected != bg_current %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=selected) }}" alt="">{% else %}<img id="preview-image" alt="">{% endif %}
                   </div>
                 </div>
               </section>
@@ -1020,7 +1070,7 @@ def control():
 	            selectedName = row.dataset.slide;
 	            document.querySelectorAll("[data-slide]").forEach((item) => item.classList.toggle("selected", item === row));
 	            previewName.textContent = selectedName === bgCurrent ? "bg" : selectedName;
-	            if (row.dataset.src) previewImage.src = `${row.dataset.src}&t=${Date.now()}`;
+	            if (row.dataset.previewSrc) previewImage.src = row.dataset.previewSrc;
 	          }
           function selectedRow() {
             return selectedName ? document.querySelector(`[data-slide="${CSS.escape(selectedName)}"]`) : null;
@@ -1153,7 +1203,9 @@ def control():
           document.getElementById("take-slide").addEventListener("click", async () => {
             if (!selectedName) return;
             const saved = await saveSettings(false);
-            if (saved) setCurrent(selectedName, {animate: true});
+            const row = selectedRow();
+            const previewSrc = row && row.dataset.src ? row.dataset.src : previewImage.src;
+            if (saved) setCurrent(selectedName, {animate: true, previewSrc});
           });
 	          document.getElementById("open-crop").addEventListener("click", openCropEditor);
 	          document.getElementById("cancel-crop").addEventListener("click", closeCropEditor);
@@ -1583,6 +1635,7 @@ def api_rotate():
 
     try:
         rotate_slide_file(requested)
+        delete_cached_previews(requested)
     except (OSError, UnidentifiedImageError, ValueError):
         return jsonify({"ok": False, "error": "rotate failed"}), 400
 
@@ -1609,6 +1662,7 @@ def api_delete():
 
     try:
         Path(resolved).unlink()
+        delete_cached_previews(requested)
     except OSError:
         return jsonify({"ok": False, "error": "delete failed"}), 400
 
@@ -1633,6 +1687,7 @@ def api_crop():
 
     try:
         crop_slide_file(requested, crop)
+        delete_cached_previews(requested)
     except (OSError, UnidentifiedImageError, ValueError):
         return jsonify({"ok": False, "error": "crop failed"}), 400
 
@@ -1688,6 +1743,7 @@ def upload():
             continue
 
         uploaded.save(target)
+        delete_cached_previews(filename)
         order = [name for name in order if name != filename]
         order.append(filename)
         saved.append(filename)
@@ -1728,6 +1784,18 @@ def slides(filename):
     if filename != os.path.basename(filename) or not allowed_file(filename):
         abort(404)
     return send_from_directory(SLIDES_DIR, filename, conditional=True)
+
+
+@app.route("/previews/<size_name>/<path:filename>")
+@login_required
+def slide_preview(size_name, filename):
+    if filename != os.path.basename(filename) or not allowed_file(filename) or not slide_exists(filename):
+        abort(404)
+    try:
+        preview = generate_preview_file(filename, size_name)
+    except (OSError, UnidentifiedImageError, ValueError):
+        abort(404)
+    return send_from_directory(PREVIEWS_DIR, preview.name, mimetype="image/jpeg", conditional=True, max_age=31536000)
 
 
 @app.route("/logos/<path:filename>")
