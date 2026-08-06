@@ -55,6 +55,8 @@ STREAM_SOURCE_DEFS = {
         "mode_env": "RTMP_STREAM_MODE",
     },
 }
+DEFAULT_STREAM_CROP = {"x": 0.34375, "y": 0.0, "w": 0.3125, "h": 1.0}
+STREAM_MODES = {"auto", "video", "iframe", "image"}
 DEFAULT_LOGO = {"filename": "", "x": 0.5, "y": 0.5, "w": 0.34}
 DEFAULT_STATE = {
     "current": "logo.png",
@@ -64,6 +66,7 @@ DEFAULT_STATE = {
     "order": [],
     "background": "blank.png",
     "logo": DEFAULT_LOGO,
+    "streams": {},
 }
 
 app = Flask(__name__)
@@ -141,9 +144,12 @@ def stream_source_url(key: str) -> str:
     return ""
 
 
-def stream_source_mode(key: str, url: str) -> str:
+def stream_source_mode(key: str, url: str, configured_mode: str = "") -> str:
+    configured = configured_mode.strip().lower() if isinstance(configured_mode, str) else ""
+    if configured in STREAM_MODES:
+        return configured
     configured = os.environ.get(STREAM_SOURCE_DEFS[key]["mode_env"], "auto").strip().lower()
-    if configured in {"video", "iframe", "image"}:
+    if configured in STREAM_MODES - {"auto"}:
         return configured
     lowered = url.lower().split("?", 1)[0]
     if lowered.endswith((".jpg", ".jpeg", ".png", ".gif", ".mjpg", ".mjpeg")):
@@ -153,28 +159,66 @@ def stream_source_mode(key: str, url: str) -> str:
     return "iframe"
 
 
-def stream_sources() -> list[dict]:
+def sanitize_stream_crop(crop: object) -> dict:
+    if not isinstance(crop, dict):
+        return dict(DEFAULT_STREAM_CROP)
+    try:
+        x = float(crop.get("x", DEFAULT_STREAM_CROP["x"]))
+        y = float(crop.get("y", DEFAULT_STREAM_CROP["y"]))
+        w = float(crop.get("w", DEFAULT_STREAM_CROP["w"]))
+        h = float(crop.get("h", DEFAULT_STREAM_CROP["h"]))
+    except (TypeError, ValueError):
+        return dict(DEFAULT_STREAM_CROP)
+    w = min(max(w, 0.05), 1.0)
+    h = min(max(h, 0.05), 1.0)
+    x = min(max(x, 0.0), 1.0 - w)
+    y = min(max(y, 0.0), 1.0 - h)
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def sanitize_stream_configs(raw_streams: object) -> dict:
+    raw_streams = raw_streams if isinstance(raw_streams, dict) else {}
+    streams = {}
+    for key in STREAM_SOURCE_DEFS:
+        raw_config = raw_streams.get(key) if isinstance(raw_streams.get(key), dict) else {}
+        url = raw_config.get("url", "")
+        mode = raw_config.get("mode", "auto")
+        streams[key] = {
+            "url": url.strip() if isinstance(url, str) else "",
+            "mode": mode if isinstance(mode, str) and mode in STREAM_MODES else "auto",
+            "crop": sanitize_stream_crop(raw_config.get("crop")),
+        }
+    return streams
+
+
+def stream_sources(state: dict = None) -> list[dict]:
+    stream_configs = state.get("streams", {}) if isinstance(state, dict) else {}
     sources = []
     for key, definition in STREAM_SOURCE_DEFS.items():
-        url = stream_source_url(key)
+        config = stream_configs.get(key, {}) if isinstance(stream_configs.get(key), dict) else {}
+        configured_url = config.get("url", "") if isinstance(config.get("url", ""), str) else ""
+        url = configured_url.strip() or stream_source_url(key)
+        configured_mode = config.get("mode", "auto") if isinstance(config.get("mode", "auto"), str) else "auto"
         sources.append({
             "key": key,
             "label": definition["label"],
             "current": make_stream_current(key),
             "url": url,
-            "mode": stream_source_mode(key, url),
+            "mode": stream_source_mode(key, url, configured_mode),
+            "configured_mode": configured_mode,
+            "crop": sanitize_stream_crop(config.get("crop")),
             "configured": bool(url),
             "view_url": f"/stream-view/{key}",
         })
     return sources
 
 
-def public_stream_sources() -> list[dict]:
-    return [{key: value for key, value in source.items() if key != "url"} for source in stream_sources()]
+def public_stream_sources(state: dict) -> list[dict]:
+    return [{key: value for key, value in source.items() if key != "url"} for source in stream_sources(state)]
 
 
 def state_response(state: dict) -> dict:
-    return {**state, "streams": public_stream_sources()}
+    return {**state, "streams": public_stream_sources(state)}
 
 
 def read_state() -> dict:
@@ -212,6 +256,7 @@ def read_state() -> dict:
         "y": min(max(float(logo.get("y", DEFAULT_LOGO["y"])), 0), 1) if isinstance(logo.get("y", DEFAULT_LOGO["y"]), (int, float)) else DEFAULT_LOGO["y"],
         "w": min(max(float(logo.get("w", DEFAULT_LOGO["w"])), 0.05), 1) if isinstance(logo.get("w", DEFAULT_LOGO["w"]), (int, float)) else DEFAULT_LOGO["w"],
     }
+    streams = sanitize_stream_configs(state.get("streams"))
     return {
         "current": current,
         "version": max(version, 0),
@@ -220,6 +265,7 @@ def read_state() -> dict:
         "order": order,
         "background": background,
         "logo": logo_state,
+        "streams": streams,
     }
 
 
@@ -776,6 +822,14 @@ BASE_STYLE = """
   .slide-tools { display: flex; align-items: center; gap: 8px; }
   .slide-meta { color: var(--muted); font-size: .82rem; font-weight: 900; white-space: nowrap; }
   .slide-meta.live { color: #047857; }
+  button.slide-meta {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 7px 9px;
+    cursor: pointer;
+  }
+  button.slide-meta:hover { border-color: var(--primary); color: var(--primary); }
   .row-action {
     width: 38px;
     height: 38px;
@@ -1015,6 +1069,24 @@ BASE_STYLE = """
     user-select: none;
     -webkit-user-drag: none;
   }
+  .stream-crop-stage {
+    position: relative;
+    display: none;
+    width: min(78vw, 920px);
+    aspect-ratio: 16 / 9;
+    max-height: calc(100vh - 210px);
+    background: #000;
+    overflow: hidden;
+  }
+  .stream-crop-stage.active { display: block; }
+  .stream-crop-stage iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #000;
+  }
   .crop-box {
     position: absolute;
     border: 3px solid #fff;
@@ -1163,6 +1235,35 @@ BASE_STYLE = """
     font-weight: 850;
     padding: 18px;
   }
+  .config-panel {
+    width: min(680px, 100%);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 28px 90px rgba(15, 23, 42, .35);
+    overflow: hidden;
+  }
+  .config-form {
+    display: grid;
+    gap: 13px;
+    padding: 14px;
+  }
+  .config-form label {
+    display: grid;
+    gap: 7px;
+    color: var(--muted);
+    font-weight: 850;
+  }
+  .config-form input,
+  .config-form select {
+    width: 100%;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    padding: 10px;
+  }
   .login { min-height: 100vh; display: grid; place-items: center; padding: 18px; }
   .login form {
     width: min(420px, 100%);
@@ -1305,7 +1406,7 @@ def logout():
 def control():
     state = read_state()
     slides = list_slides()
-    streams = stream_sources()
+    streams = stream_sources(state)
     stream_current_values = [source["current"] for source in streams]
     selectable = {BG_CURRENT, BLACK_CURRENT, *(source["current"] for source in streams), *slides}
     selected = state["current"] if state["current"] in selectable and state["current"] != BLACK_CURRENT else (slides[0] if slides else BG_CURRENT)
@@ -1352,7 +1453,7 @@ def control():
                 <span class="thumb stream-thumb">{{ source.label }}</span>
                 <span class="slide-name">{{ source.label }}</span>
                 <span class="slide-tools">
-                  <span class="slide-meta {% if state.current == source.current %}live{% endif %}">{% if state.current == source.current %}Live{% elif source.configured %}Bereit{% else %}Setup{% endif %}</span>
+                  <button class="slide-meta {% if state.current == source.current %}live{% endif %}" data-stream-config="{{ source.key }}" type="button">{% if state.current == source.current %}Live{% else %}Setup{% endif %}</button>
                 </span>
               </article>
               {% endfor %}
@@ -1442,6 +1543,9 @@ def control():
             <div class="crop-workspace">
               <div class="crop-canvas" id="crop-canvas">
                 <img id="crop-image" alt="">
+                <div class="stream-crop-stage" id="stream-crop-stage">
+                  <iframe id="stream-crop-frame" title="Stream Ausschnitt"></iframe>
+                </div>
                 <div class="crop-box" id="crop-box"></div>
               </div>
             </div>
@@ -1468,6 +1572,31 @@ def control():
               <button class="button" id="cancel-logo" type="button">Abbrechen</button>
               <button class="button primary" id="save-logo" type="button">Logo speichern</button>
             </div>
+          </div>
+        </section>
+        <section class="crop-modal" id="stream-config-modal" aria-hidden="true">
+          <div class="config-panel">
+            <div class="crop-head">
+              <div class="crop-title" id="stream-config-title">Stream konfigurieren</div>
+              <div class="crop-help">Browserfähige Stream- oder Player-URL eintragen.</div>
+            </div>
+            <form class="config-form" id="stream-config-form">
+              <label>URL
+                <input id="stream-config-url" name="url" type="url" placeholder="http://localhost:8080/player" autocomplete="off">
+              </label>
+              <label>Modus
+                <select id="stream-config-mode" name="mode">
+                  <option value="auto">Auto</option>
+                  <option value="iframe">Iframe / Player-Seite</option>
+                  <option value="video">Video</option>
+                  <option value="image">Bild / MJPEG</option>
+                </select>
+              </label>
+              <div class="crop-actions">
+                <button class="button" id="cancel-stream-config" type="button">Abbrechen</button>
+                <button class="button primary" type="submit">Speichern</button>
+              </div>
+            </form>
           </div>
         </section>
         <section class="crop-modal" id="secret-gallery-modal" aria-hidden="true">
@@ -1507,6 +1636,7 @@ def control():
 	          let selectedName = {{ selected|tojson }};
 	          const slideOrder = {{ slides|tojson }};
 	          const currentName = {{ state.current|tojson }};
+	          const streamSources = {{ streams|tojson }};
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
 	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
@@ -1534,6 +1664,14 @@ def control():
 	          const cropImage = document.getElementById("crop-image");
 	          const cropBox = document.getElementById("crop-box");
 	          const cropCanvas = document.getElementById("crop-canvas");
+	          const streamCropStage = document.getElementById("stream-crop-stage");
+	          const streamCropFrame = document.getElementById("stream-crop-frame");
+	          const streamConfigModal = document.getElementById("stream-config-modal");
+	          const streamConfigTitle = document.getElementById("stream-config-title");
+	          const streamConfigForm = document.getElementById("stream-config-form");
+	          const streamConfigUrl = document.getElementById("stream-config-url");
+	          const streamConfigMode = document.getElementById("stream-config-mode");
+	          const cancelStreamConfig = document.getElementById("cancel-stream-config");
 	          const logoModal = document.getElementById("logo-modal");
 	          const secretGalleryTrigger = document.getElementById("secret-gallery-trigger");
 	          const secretGalleryModal = document.getElementById("secret-gallery-modal");
@@ -1542,6 +1680,8 @@ def control():
 	          const logoPlacement = document.getElementById("logo-placement");
 	          const logoSize = document.getElementById("logo-size");
 	          let cropRect = {x: 0, y: 0, w: 0, h: 0};
+	          let cropMode = "image";
+	          let editingStreamKey = "";
 	          let cropDrag = null;
 	          let logoDrag = null;
 	          let logoRect = {x: logoState.x || 0.5, y: logoState.y || 0.5, w: logoState.w || 0.34};
@@ -1557,6 +1697,58 @@ def control():
 	            slideUploadSubmit.disabled = !hasFiles;
 	          });
 
+	          function streamByKey(key) {
+	            return streamSources.find((source) => source.key === key) || null;
+	          }
+	          function streamByCurrent(current) {
+	            if (!current || !current.startsWith(streamCurrentPrefix)) return null;
+	            return streamByKey(current.slice(streamCurrentPrefix.length));
+	          }
+	          function cropTargetRect() {
+	            return cropMode === "stream" ? streamCropStage.getBoundingClientRect() : cropImage.getBoundingClientRect();
+	          }
+	          function setCropModalText(title, help) {
+	            const titleNode = cropModal.querySelector(".crop-title");
+	            const helpNode = cropModal.querySelector(".crop-help");
+	            if (titleNode) titleNode.textContent = title;
+	            if (helpNode) helpNode.textContent = help;
+	          }
+	          function openStreamConfig(key) {
+	            const source = streamByKey(key);
+	            if (!source) return;
+	            editingStreamKey = key;
+	            streamConfigTitle.textContent = `${source.label} konfigurieren`;
+	            streamConfigUrl.value = source.url || "";
+	            streamConfigMode.value = source.configured_mode || "auto";
+	            streamConfigModal.classList.add("open");
+	            streamConfigModal.setAttribute("aria-hidden", "false");
+	            window.setTimeout(() => streamConfigUrl.focus(), 0);
+	          }
+	          function closeStreamConfig() {
+	            streamConfigModal.classList.remove("open");
+	            streamConfigModal.setAttribute("aria-hidden", "true");
+	            editingStreamKey = "";
+	          }
+	          async function saveStreamSource(key, values) {
+	            const source = streamByKey(key);
+	            if (!source) return false;
+	            const response = await fetch("/api/stream-source", {
+	              method: "POST",
+	              headers: {"Content-Type": "application/json"},
+	              body: JSON.stringify({
+	                key,
+	                url: values.url ?? source.url ?? "",
+	                mode: values.mode ?? source.configured_mode ?? "auto",
+	                crop: values.crop ?? source.crop
+	              })
+	            });
+	            if (!response.ok) {
+	              alert("Stream konnte nicht gespeichert werden.");
+	              return false;
+	            }
+	            return true;
+	          }
+
 	          function selectSlide(row) {
 	            selectedName = row.dataset.slide;
 	            document.querySelectorAll("[data-slide]").forEach((item) => item.classList.toggle("selected", item === row));
@@ -1566,15 +1758,15 @@ def control():
 	            previewStream.hidden = !isStream;
 	            if (isStream && row.dataset.previewSrc) previewStream.src = row.dataset.previewSrc;
 	            if (!isStream && row.dataset.previewSrc) previewImage.src = row.dataset.previewSrc;
-	            if (cropButton) cropButton.disabled = isStream || selectedName === bgCurrent;
+	            if (cropButton) cropButton.disabled = selectedName === bgCurrent;
 	          }
           function selectedRow() {
             return selectedName ? document.querySelector(`[data-slide="${CSS.escape(selectedName)}"]`) : null;
           }
           function clampCrop() {
-            const imageRect = cropImage.getBoundingClientRect();
-            cropRect.x = Math.max(0, Math.min(cropRect.x, imageRect.width - cropRect.w));
-            cropRect.y = Math.max(0, Math.min(cropRect.y, imageRect.height - cropRect.h));
+            const targetRect = cropTargetRect();
+            cropRect.x = Math.max(0, Math.min(cropRect.x, targetRect.width - cropRect.w));
+            cropRect.y = Math.max(0, Math.min(cropRect.y, targetRect.height - cropRect.h));
           }
           function renderCropBox() {
             clampCrop();
@@ -1584,32 +1776,63 @@ def control():
             cropBox.style.height = `${cropRect.h}px`;
           }
           function resetCropBox() {
-            const imageRect = cropImage.getBoundingClientRect();
-            let cropHeight = imageRect.height;
+            const targetRect = cropTargetRect();
+            let cropHeight = targetRect.height;
             let cropWidth = cropHeight * 9 / 16;
-            if (cropWidth > imageRect.width) {
-              cropWidth = imageRect.width;
+            if (cropWidth > targetRect.width) {
+              cropWidth = targetRect.width;
               cropHeight = cropWidth * 16 / 9;
             }
             cropRect = {
-              x: (imageRect.width - cropWidth) / 2,
-              y: (imageRect.height - cropHeight) / 2,
+              x: (targetRect.width - cropWidth) / 2,
+              y: (targetRect.height - cropHeight) / 2,
               w: cropWidth,
               h: cropHeight
             };
             renderCropBox();
           }
+	          function resetStreamCropBox(source) {
+	            const targetRect = cropTargetRect();
+	            const crop = source && source.crop ? source.crop : {x: 0.34375, y: 0, w: 0.3125, h: 1};
+	            cropRect = {
+	              x: crop.x * targetRect.width,
+	              y: crop.y * targetRect.height,
+	              w: crop.w * targetRect.width,
+	              h: crop.h * targetRect.height
+	            };
+	            renderCropBox();
+	          }
 	          function openCropEditor() {
 	            const row = selectedRow();
-	            if (!selectedName || selectedName === bgCurrent || !row || row.dataset.kind === "stream") return;
-            cropModal.classList.add("open");
-            cropModal.setAttribute("aria-hidden", "false");
-            cropImage.onload = resetCropBox;
-            cropImage.src = `${row.dataset.src}&crop=${Date.now()}`;
+	            if (!selectedName || selectedName === bgCurrent || !row) return;
+	            cropModal.classList.add("open");
+	            cropModal.setAttribute("aria-hidden", "false");
+	            if (row.dataset.kind === "stream") {
+	              const source = streamByCurrent(selectedName);
+	              cropMode = "stream";
+	              editingStreamKey = source ? source.key : "";
+	              setCropModalText("Stream-Ausschnitt bearbeiten", "Den 9:16-Rahmen verschieben und speichern. Der Stream selbst bleibt unveraendert.");
+	              cropImage.hidden = true;
+	              cropImage.removeAttribute("src");
+	              streamCropStage.classList.add("active");
+	              streamCropFrame.src = `${row.dataset.src}&cropEdit=${Date.now()}`;
+	              window.setTimeout(() => resetStreamCropBox(source), 80);
+	              return;
+	            }
+	            cropMode = "image";
+	            editingStreamKey = "";
+	            setCropModalText("Ausschnitt bearbeiten", "Den 9:16-Rahmen verschieben und speichern. Die Grafik wird dauerhaft zugeschnitten.");
+	            cropImage.hidden = false;
+	            streamCropStage.classList.remove("active");
+	            streamCropFrame.removeAttribute("src");
+	            cropImage.onload = resetCropBox;
+	            cropImage.src = `${row.dataset.src}&crop=${Date.now()}`;
           }
 	          function closeCropEditor() {
 	            cropModal.classList.remove("open");
 	            cropModal.setAttribute("aria-hidden", "true");
+	            streamCropFrame.removeAttribute("src");
+	            cropMode = "image";
 	          }
 	          function clampLogo() {
 	            logoRect.x = Math.max(0, Math.min(logoRect.x, 1));
@@ -1748,6 +1971,20 @@ def control():
 	          cropModal.addEventListener("click", (event) => {
 	            if (event.target === cropModal) closeCropEditor();
 	          });
+	          streamConfigModal.addEventListener("click", (event) => {
+	            if (event.target === streamConfigModal) closeStreamConfig();
+	          });
+	          cancelStreamConfig.addEventListener("click", closeStreamConfig);
+	          streamConfigForm.addEventListener("submit", async (event) => {
+	            event.preventDefault();
+	            if (!editingStreamKey) return;
+	            const ok = await saveStreamSource(editingStreamKey, {
+	              url: streamConfigUrl.value,
+	              mode: streamConfigMode.value
+	            });
+	            if (!ok) return;
+	            window.location.reload();
+	          });
 	          logoModal.addEventListener("click", (event) => {
 	            if (event.target === logoModal) closeLogoEditor();
 	          });
@@ -1781,22 +2018,29 @@ def control():
           cropBox.addEventListener("pointercancel", () => { cropDrag = null; });
 	          document.getElementById("save-crop").addEventListener("click", async () => {
 	            if (!selectedName || selectedName === bgCurrent) return;
-            const imageRect = cropImage.getBoundingClientRect();
-            const crop = {
-              x: cropRect.x / imageRect.width,
-              y: cropRect.y / imageRect.height,
-              w: cropRect.w / imageRect.width,
-              h: cropRect.h / imageRect.height
-            };
-            const response = await fetch("/api/crop", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({current: selectedName, crop})
-            });
-            if (!response.ok) {
-              alert("Ausschnitt konnte nicht gespeichert werden.");
-              return;
-            }
+	            const targetRect = cropTargetRect();
+	            const crop = {
+	              x: cropRect.x / targetRect.width,
+	              y: cropRect.y / targetRect.height,
+	              w: cropRect.w / targetRect.width,
+	              h: cropRect.h / targetRect.height
+	            };
+	            if (cropMode === "stream") {
+	              if (!editingStreamKey) return;
+	              const ok = await saveStreamSource(editingStreamKey, {crop});
+	              if (!ok) return;
+	              window.location.reload();
+	              return;
+	            }
+	            const response = await fetch("/api/crop", {
+	              method: "POST",
+	              headers: {"Content-Type": "application/json"},
+	              body: JSON.stringify({current: selectedName, crop})
+	            });
+	            if (!response.ok) {
+	              alert("Ausschnitt konnte nicht gespeichert werden.");
+	              return;
+	            }
 	            window.location.reload();
 	          });
 	          logoPlacement.addEventListener("pointerdown", (event) => {
@@ -1916,6 +2160,13 @@ def control():
               rotateSlide(button.dataset.rowRotate);
             });
           });
+	          document.querySelectorAll("[data-stream-config]").forEach((button) => {
+	            button.addEventListener("click", (event) => {
+	              event.stopPropagation();
+	              event.preventDefault();
+	              openStreamConfig(button.dataset.streamConfig);
+	            });
+	          });
           document.querySelectorAll("[data-secret-delete]").forEach((button) => {
             button.addEventListener("click", (event) => {
               event.stopPropagation();
@@ -2096,14 +2347,25 @@ def stream_view(key):
     if key not in STREAM_SOURCE_DEFS:
         abort(404)
 
-    stream = next(item for item in stream_sources() if item["key"] == key)
+    state = read_state()
+    stream = next(item for item in stream_sources(state) if item["key"] == key)
     scheme = urlparse(stream["url"]).scheme.lower()
     direct_rtmp = scheme in {"rtmp", "rtmps", "rtmpe", "rtmpt"}
+    crop_edit = "cropEdit" in request.args
+    crop = {"x": 0, "y": 0, "w": 1, "h": 1} if crop_edit else stream["crop"]
     return render_template_string(
         """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ stream.label }}</title>
         <style>
           html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-          .media { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; border: 0; background: #000; }
+          .crop-source {
+            position: fixed;
+            left: calc(var(--crop-x) * -100vw / var(--crop-w));
+            top: calc(var(--crop-y) * -100vh / var(--crop-h));
+            width: calc(100vw / var(--crop-w));
+            height: calc(100vh / var(--crop-h));
+            background: #000;
+          }
+          .media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border: 0; background: #000; }
           .message { position: fixed; inset: 0; display: grid; place-items: center; padding: 8vw; color: rgba(255,255,255,.76); font: 800 clamp(15px, 3vw, 30px) system-ui, sans-serif; text-align: center; line-height: 1.25; background: #000; }
           .message small { display: block; margin-top: .8em; color: rgba(255,255,255,.48); font-size: .62em; font-weight: 700; }
         </style></head><body>
@@ -2112,9 +2374,9 @@ def stream_view(key):
         {% elif direct_rtmp %}
           <div class="message">RTMP kann Chromium nicht direkt abspielen.<small>Bitte als HLS/WebRTC/MJPEG oder als Browser-Player-URL bereitstellen.</small></div>
         {% elif stream.mode == "image" %}
-          <img class="media" src="{{ stream.url }}" alt="">
+          <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><img class="media" src="{{ stream.url }}" alt=""></div>
         {% elif stream.mode == "video" %}
-          <video class="media" id="stream-video" autoplay muted playsinline></video>
+          <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><video class="media" id="stream-video" autoplay muted playsinline></video></div>
           <div class="message" id="stream-message" hidden>Stream konnte nicht gestartet werden.</div>
           <script>
             const url = {{ stream.url|tojson }};
@@ -2130,10 +2392,11 @@ def stream_view(key):
             }
           </script>
         {% else %}
-          <iframe class="media" src="{{ stream.url }}" allow="autoplay; fullscreen; encrypted-media" title="{{ stream.label }}"></iframe>
+          <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><iframe class="media" src="{{ stream.url }}" allow="autoplay; fullscreen; encrypted-media" title="{{ stream.label }}"></iframe></div>
         {% endif %}
         </body></html>""",
         stream=stream,
+        crop=crop,
         direct_rtmp=direct_rtmp,
     )
 
@@ -2385,6 +2648,36 @@ def api_settings():
     }
     write_state(new_state)
     return jsonify({"ok": True, **new_state})
+
+
+@app.route("/api/stream-source", methods=["POST"])
+@login_required
+def api_stream_source():
+    payload = request.get_json(silent=True) or {}
+    key = payload.get("key", "")
+    if key not in STREAM_SOURCE_DEFS:
+        return jsonify({"ok": False, "error": "unknown stream source"}), 400
+
+    state = read_state()
+    streams = sanitize_stream_configs(state.get("streams"))
+    current_config = streams[key]
+    url = payload.get("url", current_config["url"])
+    mode = payload.get("mode", current_config["mode"])
+    crop = payload.get("crop", current_config["crop"])
+
+    if not isinstance(url, str):
+        return jsonify({"ok": False, "error": "invalid url"}), 400
+    if not isinstance(mode, str) or mode not in STREAM_MODES:
+        return jsonify({"ok": False, "error": "invalid mode"}), 400
+
+    streams[key] = {
+        "url": url.strip(),
+        "mode": mode,
+        "crop": sanitize_stream_crop(crop),
+    }
+    new_state = {**state, "streams": streams, "version": state["version"] + 1}
+    write_state(new_state)
+    return jsonify({"ok": True, **state_response(new_state)})
 
 
 @app.route("/api/rotate", methods=["POST"])

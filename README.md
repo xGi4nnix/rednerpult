@@ -50,11 +50,14 @@ Zusätzliche Werkzeuge:
 
 In der Quellenliste erscheinen unter `bg` zwei feste Quellen: `NDI` und `RTMP`.
 Sie verhalten sich wie eingebaute Quellen, können also nicht gelöscht werden.
-Auf `/display` werden sie bildschirmfüllend aus der Mitte zugeschnitten.
+Über `Setup` kann die jeweilige Stream-URL direkt im Browserinterface
+gespeichert werden. Mit `Ausschnitt bearbeiten` wird der sichtbare 9:16-
+Ausschnitt der gewählten Streamquelle eingestellt.
 
 Chromium kann NDI und RTMP nicht direkt dekodieren. Trage deshalb eine
 browserfähige Zwischenquelle ein, zum Beispiel MJPEG, MP4/WebM, eine WebRTC-
-oder HLS-Player-Seite oder eine lokale Preview-Seite eines NDI/RTMP-Gateways:
+oder HLS-Player-Seite oder eine lokale Preview-Seite eines NDI/RTMP-Gateways.
+Alternativ können Startwerte weiterhin per Umgebung gesetzt werden:
 
 ```bash
 export NDI_STREAM_URL="http://localhost:8080/ndi-preview"
