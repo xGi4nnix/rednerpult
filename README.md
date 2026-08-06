@@ -46,6 +46,31 @@ Zusätzliche Werkzeuge:
 - Ausschnitt bearbeiten: Eine Grafik dauerhaft auf 9:16 zuschneiden.
 - Sortieren: Grafiken per Drag-and-drop in der Liste umordnen.
 
+## NDI- und RTMP-Quellen
+
+In der Quellenliste erscheinen unter `bg` zwei feste Quellen: `NDI` und `RTMP`.
+Sie verhalten sich wie eingebaute Quellen, können also nicht gelöscht werden.
+Auf `/display` werden sie bildschirmfüllend aus der Mitte zugeschnitten.
+
+Chromium kann NDI und RTMP nicht direkt dekodieren. Trage deshalb eine
+browserfähige Zwischenquelle ein, zum Beispiel MJPEG, MP4/WebM, eine WebRTC-
+oder HLS-Player-Seite oder eine lokale Preview-Seite eines NDI/RTMP-Gateways:
+
+```bash
+export NDI_STREAM_URL="http://localhost:8080/ndi-preview"
+export RTMP_STREAM_URL="http://localhost:8080/rtmp-player"
+```
+
+Optional kann festgelegt werden, wie die URL eingebettet wird:
+
+```bash
+export NDI_STREAM_MODE=iframe
+export RTMP_STREAM_MODE=video
+```
+
+Erlaubt sind `auto`, `video`, `image` und `iframe`. Ohne Modus erkennt die App
+einfache Bild- und Video-URLs automatisch und nutzt sonst `iframe`.
+
 ## URLs
 
 Lokal auf dem Pult-Rechner:

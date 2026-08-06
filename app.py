@@ -8,6 +8,7 @@ import threading
 import time
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import (
     Flask,
@@ -41,6 +42,19 @@ TRANSITIONS = {"cut", "fade"}
 BG_CURRENT = "__background__"
 BLACK_CURRENT = "__black__"
 SECRET_CURRENT_PREFIX = "__secret__:"
+STREAM_CURRENT_PREFIX = "__stream__:"
+STREAM_SOURCE_DEFS = {
+    "ndi": {
+        "label": "NDI",
+        "url_env": ("NDI_STREAM_URL", "NDI_SOURCE_URL"),
+        "mode_env": "NDI_STREAM_MODE",
+    },
+    "rtmp": {
+        "label": "RTMP",
+        "url_env": ("RTMP_STREAM_URL", "RTMP_SOURCE_URL"),
+        "mode_env": "RTMP_STREAM_MODE",
+    },
+}
 DEFAULT_LOGO = {"filename": "", "x": 0.5, "y": 0.5, "w": 0.34}
 DEFAULT_STATE = {
     "current": "logo.png",
@@ -108,6 +122,61 @@ def secret_current_filename(current: str) -> str:
     return current.removeprefix(SECRET_CURRENT_PREFIX)
 
 
+def make_stream_current(key: str) -> str:
+    return f"{STREAM_CURRENT_PREFIX}{key}"
+
+
+def stream_current_key(current: str) -> str:
+    if not current.startswith(STREAM_CURRENT_PREFIX):
+        return ""
+    key = current.removeprefix(STREAM_CURRENT_PREFIX)
+    return key if key in STREAM_SOURCE_DEFS else ""
+
+
+def stream_source_url(key: str) -> str:
+    for env_name in STREAM_SOURCE_DEFS[key]["url_env"]:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def stream_source_mode(key: str, url: str) -> str:
+    configured = os.environ.get(STREAM_SOURCE_DEFS[key]["mode_env"], "auto").strip().lower()
+    if configured in {"video", "iframe", "image"}:
+        return configured
+    lowered = url.lower().split("?", 1)[0]
+    if lowered.endswith((".jpg", ".jpeg", ".png", ".gif", ".mjpg", ".mjpeg")):
+        return "image"
+    if lowered.endswith((".mp4", ".webm", ".ogg", ".ogv", ".m3u8")):
+        return "video"
+    return "iframe"
+
+
+def stream_sources() -> list[dict]:
+    sources = []
+    for key, definition in STREAM_SOURCE_DEFS.items():
+        url = stream_source_url(key)
+        sources.append({
+            "key": key,
+            "label": definition["label"],
+            "current": make_stream_current(key),
+            "url": url,
+            "mode": stream_source_mode(key, url),
+            "configured": bool(url),
+            "view_url": f"/stream-view/{key}",
+        })
+    return sources
+
+
+def public_stream_sources() -> list[dict]:
+    return [{key: value for key, value in source.items() if key != "url"} for source in stream_sources()]
+
+
+def state_response(state: dict) -> dict:
+    return {**state, "streams": public_stream_sources()}
+
+
 def read_state() -> dict:
     ensure_storage()
     try:
@@ -131,7 +200,7 @@ def read_state() -> dict:
     if secret_current:
         if not secret_image_exists(secret_current):
             current = ""
-    elif current and current not in {BG_CURRENT, BLACK_CURRENT} and not slide_exists(current):
+    elif current and current not in {BG_CURRENT, BLACK_CURRENT} and not stream_current_key(current) and not slide_exists(current):
         current = ""
     logo = state.get("logo") if isinstance(state.get("logo"), dict) else {}
     logo_filename = logo.get("filename") if isinstance(logo.get("filename"), str) else ""
@@ -685,6 +754,15 @@ BASE_STYLE = """
   .slide-row.active { box-shadow: inset 4px 0 0 var(--accent); }
   .slide-row.bg-row { background: #f8fafc; }
   .slide-row.bg-row .thumb { display: grid; place-items: center; color: #fff; font-weight: 950; font-size: .72rem; }
+  .slide-row.stream-row { background: #fbfcfe; }
+  .slide-row.stream-row .thumb {
+    display: grid;
+    place-items: center;
+    color: #fff;
+    font-weight: 950;
+    font-size: .7rem;
+    background: linear-gradient(135deg, #0f172a, #2457d6 58%, #00a88f);
+  }
   .slide-row.dragging { opacity: .45; }
   .slide-row.drag-over { outline: 2px solid var(--primary); outline-offset: -2px; }
   .thumb { width: 50px; height: 50px; border-radius: 8px; object-fit: cover; background: #000; border: 1px solid var(--line); }
@@ -784,6 +862,16 @@ BASE_STYLE = """
     position: relative;
   }
   .monitor-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .monitor-frame img[hidden],
+  .monitor-frame iframe[hidden] { display: none; }
+  .stream-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #000;
+  }
   .program-frame img {
     position: absolute;
     inset: 0;
@@ -1217,8 +1305,13 @@ def logout():
 def control():
     state = read_state()
     slides = list_slides()
+    streams = stream_sources()
+    stream_current_values = [source["current"] for source in streams]
+    selectable = {BG_CURRENT, BLACK_CURRENT, *(source["current"] for source in streams), *slides}
+    selected = state["current"] if state["current"] in selectable and state["current"] != BLACK_CURRENT else (slides[0] if slides else BG_CURRENT)
     secret_images = secret_image_filenames_sorted()
     current_secret = secret_current_filename(state["current"])
+    current_stream = stream_current_key(state["current"])
     message = request.args.get("message", "")
     if "hochgeladen" in message:
         message = ""
@@ -1236,7 +1329,6 @@ def control():
           </div>
         </header>
         {% if message %}<div class="message">{{ message }}</div>{% endif %}
-        {% set selected = bg_current if state.current == bg_current else (state.current if state.current in slides else (slides[0] if slides else bg_current)) %}
         <section class="shell">
           <aside class="panel library">
             <div class="panel-head">
@@ -1255,6 +1347,15 @@ def control():
                   <span class="slide-meta {% if state.current == bg_current %}live{% endif %}">{% if state.current == bg_current %}Live{% else %}Bereit{% endif %}</span>
                 </span>
               </article>
+              {% for source in streams %}
+              <article class="slide-row stream-row {% if state.current == source.current %}active{% endif %} {% if selected == source.current %}selected{% endif %}" data-slide="{{ source.current }}" data-kind="stream" data-label="{{ source.label }}" data-src="{{ source.view_url }}?v={{ state.version }}" data-preview-src="{{ source.view_url }}?v={{ state.version }}" role="button" tabindex="0">
+                <span class="thumb stream-thumb">{{ source.label }}</span>
+                <span class="slide-name">{{ source.label }}</span>
+                <span class="slide-tools">
+                  <span class="slide-meta {% if state.current == source.current %}live{% endif %}">{% if state.current == source.current %}Live{% elif source.configured %}Bereit{% else %}Setup{% endif %}</span>
+                </span>
+              </article>
+              {% endfor %}
               {% for slide in slides %}
               <article class="slide-row {% if slide == state.current %}active{% endif %} {% if slide == selected %}selected{% endif %}" draggable="true" data-slide="{{ slide }}" data-src="{{ url_for('slides', filename=slide) }}?v={{ state.version }}" data-preview-src="{{ url_for('slide_preview', size_name='preview', filename=slide) }}?v={{ state.version }}" role="button" tabindex="0">
                 <img class="thumb" src="{{ url_for('slide_preview', size_name='thumb', filename=slide) }}?v={{ state.version }}" alt="" loading="lazy" decoding="async">
@@ -1275,7 +1376,8 @@ def control():
                 <div class="monitor-label">Preview</div>
                 <div class="monitor-stage">
                   <div class="monitor-frame">
-                    {% if selected == bg_current and state.background %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=state.background) }}?v={{ state.version }}" alt="">{% elif selected and selected != bg_current %}<img id="preview-image" src="{{ url_for('slide_preview', size_name='preview', filename=selected) }}?v={{ state.version }}" alt="">{% else %}<img id="preview-image" alt="">{% endif %}
+                    <img id="preview-image" {% if selected == bg_current and state.background %}src="{{ url_for('slide_preview', size_name='preview', filename=state.background) }}?v={{ state.version }}"{% elif selected in slides %}src="{{ url_for('slide_preview', size_name='preview', filename=selected) }}?v={{ state.version }}"{% endif %} alt="" {% if selected not in slides and selected != bg_current %}hidden{% endif %}>
+                    <iframe id="preview-stream" class="stream-frame" {% if selected in stream_current_values %}src="{{ (streams|selectattr('current', 'equalto', selected)|first).view_url }}?v={{ state.version }}"{% else %}hidden{% endif %} title="Stream Preview"></iframe>
                   </div>
                 </div>
               </section>
@@ -1308,11 +1410,15 @@ def control():
                       <img id="program-image" alt="">
                     {% elif current_secret %}
                       <img id="program-image" src="{{ url_for('secret_gallery_image', filename=current_secret) }}?v={{ state.version }}" alt="">
+                    {% elif current_stream %}
+                      <img id="program-image" alt="" hidden>
+                      <iframe id="program-stream" class="stream-frame" src="/stream-view/{{ current_stream }}?v={{ state.version }}" title="Program Stream"></iframe>
                     {% elif state.current %}
                       <img id="program-image" src="{{ url_for('slides', filename=state.current) }}?v={{ state.version }}" alt="">
                     {% else %}
                       <img id="program-image" alt="">
                     {% endif %}
+                    {% if not current_stream %}<iframe id="program-stream" class="stream-frame" hidden title="Program Stream"></iframe>{% endif %}
                     <img class="program-transition-layer" id="program-next-image" alt="">
                   </div>
                 </div>
@@ -1320,7 +1426,7 @@ def control():
             </div>
 
             <section class="preview-body">
-              <div class="preview-name" id="preview-name">{% if selected == bg_current %}bg{% else %}{{ selected or "Keine Grafik vorhanden" }}{% endif %}</div>
+              <div class="preview-name" id="preview-name">{% if selected == bg_current %}bg{% elif selected in stream_current_values %}{{ (streams|selectattr('current', 'equalto', selected)|first).label }}{% else %}{{ selected or "Keine Grafik vorhanden" }}{% endif %}</div>
               <div class="utility-actions">
                 <button class="button" id="open-crop" type="button">Ausschnitt bearbeiten</button>
               </div>
@@ -1404,14 +1510,18 @@ def control():
 	          const bgCurrent = {{ bg_current|tojson }};
 	          const blackCurrent = {{ black_current|tojson }};
 	          const secretCurrentPrefix = {{ secret_current_prefix|tojson }};
+	          const streamCurrentPrefix = {{ stream_current_prefix|tojson }};
 	          const secretGalleryAutoCloseMs = 30000;
 	          const secretGalleryGraceMs = 30000;
 	          const blackImageSrc = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 	          const logoState = {{ state.logo|tojson }};
 	          const previewImage = document.getElementById("preview-image");
+	          const previewStream = document.getElementById("preview-stream");
 	          const previewName = document.getElementById("preview-name");
 	          const programImage = document.getElementById("program-image");
+	          const programStream = document.getElementById("program-stream");
 	          const programNextImage = document.getElementById("program-next-image");
+	          const cropButton = document.getElementById("open-crop");
 	          const durationInput = document.getElementById("duration");
 	          const settingsStatus = document.getElementById("settings-status");
 	          const connectionStatus = document.getElementById("connection-status");
@@ -1450,8 +1560,13 @@ def control():
 	          function selectSlide(row) {
 	            selectedName = row.dataset.slide;
 	            document.querySelectorAll("[data-slide]").forEach((item) => item.classList.toggle("selected", item === row));
-	            previewName.textContent = selectedName === bgCurrent ? "bg" : selectedName;
-	            if (row.dataset.previewSrc) previewImage.src = row.dataset.previewSrc;
+	            previewName.textContent = row.dataset.label || (selectedName === bgCurrent ? "bg" : selectedName);
+	            const isStream = row.dataset.kind === "stream";
+	            previewImage.hidden = isStream;
+	            previewStream.hidden = !isStream;
+	            if (isStream && row.dataset.previewSrc) previewStream.src = row.dataset.previewSrc;
+	            if (!isStream && row.dataset.previewSrc) previewImage.src = row.dataset.previewSrc;
+	            if (cropButton) cropButton.disabled = isStream || selectedName === bgCurrent;
 	          }
           function selectedRow() {
             return selectedName ? document.querySelector(`[data-slide="${CSS.escape(selectedName)}"]`) : null;
@@ -1485,9 +1600,8 @@ def control():
             renderCropBox();
           }
 	          function openCropEditor() {
-	            if (!selectedName || selectedName === bgCurrent) return;
 	            const row = selectedRow();
-	            if (!row) return;
+	            if (!selectedName || selectedName === bgCurrent || !row || row.dataset.kind === "stream") return;
             cropModal.classList.add("open");
             cropModal.setAttribute("aria-hidden", "false");
             cropImage.onload = resetCropBox;
@@ -1578,7 +1692,7 @@ def control():
 	              headers: {"Content-Type": "application/json"},
 	              body: JSON.stringify({current: name, ...currentSettingsPayload()})
 	            });
-	            const animationPromise = options.animate ? animateProgramTransition(options.previewSrc) : Promise.resolve(0);
+	            const animationPromise = options.animate && !options.isStream ? animateProgramTransition(options.previewSrc) : Promise.resolve(0);
 
 	            let response;
 	            try {
@@ -1623,12 +1737,12 @@ def control():
           takeSlideButton.addEventListener("click", async () => {
             if (!selectedName) return;
             takeSlideButton.disabled = true;
-            const row = selectedRow();
-            const previewSrc = row && row.dataset.src ? row.dataset.src : previewImage.src;
-            await setCurrent(selectedName, {animate: true, previewSrc});
-            takeSlideButton.disabled = false;
-          });
-	          document.getElementById("open-crop").addEventListener("click", openCropEditor);
+	            const row = selectedRow();
+	            const previewSrc = row && row.dataset.src ? row.dataset.src : previewImage.src;
+	            await setCurrent(selectedName, {animate: true, previewSrc, isStream: row && row.dataset.kind === "stream"});
+	            takeSlideButton.disabled = false;
+	          });
+	          cropButton.addEventListener("click", openCropEditor);
 	          document.getElementById("cancel-crop").addEventListener("click", closeCropEditor);
 	          document.getElementById("cancel-logo").addEventListener("click", closeLogoEditor);
 	          cropModal.addEventListener("click", (event) => {
@@ -1963,12 +2077,64 @@ def control():
         style=BASE_STYLE,
         state=state,
         slides=slides,
+        selected=selected,
+        streams=streams,
+        stream_current_values=stream_current_values,
         secret_images=secret_images,
         current_secret=current_secret,
+        current_stream=current_stream,
         message=message,
         bg_current=BG_CURRENT,
         black_current=BLACK_CURRENT,
         secret_current_prefix=SECRET_CURRENT_PREFIX,
+        stream_current_prefix=STREAM_CURRENT_PREFIX,
+    )
+
+
+@app.route("/stream-view/<key>")
+def stream_view(key):
+    if key not in STREAM_SOURCE_DEFS:
+        abort(404)
+
+    stream = next(item for item in stream_sources() if item["key"] == key)
+    scheme = urlparse(stream["url"]).scheme.lower()
+    direct_rtmp = scheme in {"rtmp", "rtmps", "rtmpe", "rtmpt"}
+    return render_template_string(
+        """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ stream.label }}</title>
+        <style>
+          html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+          .media { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; border: 0; background: #000; }
+          .message { position: fixed; inset: 0; display: grid; place-items: center; padding: 8vw; color: rgba(255,255,255,.76); font: 800 clamp(15px, 3vw, 30px) system-ui, sans-serif; text-align: center; line-height: 1.25; background: #000; }
+          .message small { display: block; margin-top: .8em; color: rgba(255,255,255,.48); font-size: .62em; font-weight: 700; }
+        </style></head><body>
+        {% if not stream.configured %}
+          <div class="message">{{ stream.label }} ist noch nicht konfiguriert.<small>{{ stream.label }}_STREAM_URL setzen und App neu starten.</small></div>
+        {% elif direct_rtmp %}
+          <div class="message">RTMP kann Chromium nicht direkt abspielen.<small>Bitte als HLS/WebRTC/MJPEG oder als Browser-Player-URL bereitstellen.</small></div>
+        {% elif stream.mode == "image" %}
+          <img class="media" src="{{ stream.url }}" alt="">
+        {% elif stream.mode == "video" %}
+          <video class="media" id="stream-video" autoplay muted playsinline></video>
+          <div class="message" id="stream-message" hidden>Stream konnte nicht gestartet werden.</div>
+          <script>
+            const url = {{ stream.url|tojson }};
+            const video = document.getElementById("stream-video");
+            const message = document.getElementById("stream-message");
+            const isHls = url.toLowerCase().split("?", 1)[0].endsWith(".m3u8");
+            if (isHls && !video.canPlayType("application/vnd.apple.mpegurl")) {
+              message.hidden = false;
+              message.innerHTML = "HLS wird von diesem Browser nicht nativ abgespielt.<small>Bitte eine Browser-Player-URL verwenden oder den Stream als MP4/WebM/MJPEG bereitstellen.</small>";
+            } else {
+              video.src = url;
+              video.play().catch(() => { message.hidden = false; });
+            }
+          </script>
+        {% else %}
+          <iframe class="media" src="{{ stream.url }}" allow="autoplay; fullscreen; encrypted-media" title="{{ stream.label }}"></iframe>
+        {% endif %}
+        </body></html>""",
+        stream=stream,
+        direct_rtmp=direct_rtmp,
     )
 
 
@@ -1980,6 +2146,8 @@ def display():
       #stage { position: fixed; inset: 0; display: grid; place-items: center; background: #000; }
       .scene { position: fixed; inset: 0; opacity: 0; display: none; background: #000; overflow: hidden; }
       .slide-img, .bg-img { position: absolute; inset: 0; width: 100vw; height: 100vh; object-fit: cover; }
+      .stream-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+      .stream-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 8vw; color: rgba(255,255,255,.72); font: 700 clamp(18px, 4vw, 42px) system-ui, sans-serif; text-align: center; }
       .logo-img { position: absolute; transform: translate(-50%, -50%); height: auto; }
       #waiting { color: rgba(255,255,255,.35); font: 600 22px system-ui, sans-serif; }
     </style></head><body><main id="stage"><div class="scene" id="scene-a"></div><div class="scene" id="scene-b"></div><div id="waiting">Warte auf Grafik...</div></main>
@@ -2024,6 +2192,33 @@ def display():
           return new Promise((resolve) => {
             bg.onload = () => resolve(true);
             bg.onerror = () => resolve(false);
+          });
+        }
+        if (state.current.startsWith("__stream__:")) {
+          const key = state.current.slice("__stream__:".length);
+          const source = (state.streams || []).find((item) => item.key === key);
+          if (!source || !source.configured) {
+            const placeholder = document.createElement("div");
+            placeholder.className = "stream-placeholder";
+            placeholder.textContent = source ? `${source.label} ist noch nicht konfiguriert.` : "Streamquelle ist unbekannt.";
+            scene.appendChild(placeholder);
+            return Promise.resolve(true);
+          }
+          const frame = document.createElement("iframe");
+          frame.className = "stream-frame";
+          frame.title = `${source.label} Stream`;
+          frame.allow = "autoplay; fullscreen; encrypted-media";
+          frame.src = `${source.view_url}?display=1&v=${state.version}`;
+          scene.appendChild(frame);
+          return new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              resolve(true);
+            };
+            frame.onload = finish;
+            window.setTimeout(finish, 1200);
           });
         }
         if (state.current.startsWith("__secret__:")) {
@@ -2094,7 +2289,7 @@ def display():
 @app.route("/api/current", methods=["GET", "POST"])
 def api_current():
     if request.method == "GET":
-        return jsonify(read_state())
+        return jsonify(state_response(read_state()))
 
     if not session.get("logged_in"):
         abort(401)
@@ -2103,11 +2298,14 @@ def api_current():
     requested = payload.get("current", "")
     state = read_state()
     secret_requested = secret_current_filename(requested) if isinstance(requested, str) else ""
+    stream_requested = stream_current_key(requested) if isinstance(requested, str) else ""
     if requested == BLACK_CURRENT:
         pass
     elif requested == BG_CURRENT:
         if not state["background"]:
             return jsonify({"ok": False, "error": "background missing"}), 400
+    elif stream_requested:
+        pass
     elif secret_requested:
         if not secret_image_exists(secret_requested):
             return jsonify({"ok": False, "error": "unknown secret image"}), 400
@@ -2124,7 +2322,7 @@ def api_current():
     version = state["version"] + 1
     new_state = {**state, "current": requested, "transition": transition, "duration": duration, "version": version}
     write_state(new_state)
-    return jsonify({"ok": True, **new_state})
+    return jsonify({"ok": True, **state_response(new_state)})
 
 
 @app.route("/api/background", methods=["POST"])
