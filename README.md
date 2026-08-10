@@ -50,24 +50,25 @@ Zusätzliche Werkzeuge:
 
 In der Quellenliste erscheinen unter `bg` zwei feste Quellen: `NDI` und `RTMP`.
 Sie verhalten sich wie eingebaute Quellen, können also nicht gelöscht werden.
-Über `Setup` kann die jeweilige Stream-URL direkt im Browserinterface
-gespeichert werden. Mit `Ausschnitt bearbeiten` wird der sichtbare 9:16-
-Ausschnitt der gewählten Streamquelle eingestellt.
+Über `Setup` sucht NDI nach verfügbaren Quellen im Netzwerk und speichert die
+Auswahl über den NDI-Streamnamen, wie in NDI Tools oder OBS. Dafür müssen die
+NDI Runtime und das Python-Binding `NDIlib` auf dem Rechner verfügbar sein;
+unter Linux muss außerdem Discovery über Avahi/mDNS funktionieren.
 
-Chromium kann NDI und RTMP nicht direkt dekodieren. Trage deshalb eine
-browserfähige Zwischenquelle ein, zum Beispiel MJPEG, MP4/WebM, eine WebRTC-
-oder HLS-Player-Seite oder eine lokale Preview-Seite eines NDI/RTMP-Gateways.
-Alternativ können Startwerte weiterhin per Umgebung gesetzt werden:
+RTMP bleibt eine browserfähige Zwischenquelle, zum Beispiel MJPEG, MP4/WebM,
+eine WebRTC- oder HLS-Player-Seite. Mit `Ausschnitt bearbeiten` wird der
+sichtbare 9:16-Ausschnitt der gewählten Streamquelle eingestellt.
+
+Startwerte können weiterhin per Umgebung gesetzt werden:
 
 ```bash
-export NDI_STREAM_URL="http://localhost:8080/ndi-preview"
+export NDI_SOURCE_NAME="RECHNERNAME (Kamera 1)"
 export RTMP_STREAM_URL="http://localhost:8080/rtmp-player"
 ```
 
-Optional kann festgelegt werden, wie die URL eingebettet wird:
+Für RTMP kann festgelegt werden, wie die URL eingebettet wird:
 
 ```bash
-export NDI_STREAM_MODE=iframe
 export RTMP_STREAM_MODE=video
 ```
 

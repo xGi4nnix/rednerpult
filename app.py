@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import shutil
 import subprocess
@@ -13,12 +14,14 @@ from urllib.parse import urlparse
 from flask import (
     Flask,
     abort,
+    Response,
     jsonify,
     redirect,
     render_template_string,
     request,
     send_from_directory,
     session,
+    stream_with_context,
     url_for,
 )
 from werkzeug.security import safe_join
@@ -46,8 +49,7 @@ STREAM_CURRENT_PREFIX = "__stream__:"
 STREAM_SOURCE_DEFS = {
     "ndi": {
         "label": "NDI",
-        "url_env": ("NDI_STREAM_URL", "NDI_SOURCE_URL"),
-        "mode_env": "NDI_STREAM_MODE",
+        "source_env": ("NDI_SOURCE_NAME", "NDI_STREAM_NAME"),
     },
     "rtmp": {
         "label": "RTMP",
@@ -72,6 +74,11 @@ DEFAULT_STATE = {
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET") or "dev-only-change-me"
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+
+_ndi_module = None
+_ndi_error = ""
+_ndi_initialized = False
+_ndi_lock = threading.Lock()
 
 
 def ensure_storage() -> None:
@@ -137,7 +144,15 @@ def stream_current_key(current: str) -> str:
 
 
 def stream_source_url(key: str) -> str:
-    for env_name in STREAM_SOURCE_DEFS[key]["url_env"]:
+    for env_name in STREAM_SOURCE_DEFS[key].get("url_env", ()):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def stream_source_name(key: str) -> str:
+    for env_name in STREAM_SOURCE_DEFS[key].get("source_env", ()):
         value = os.environ.get(env_name, "").strip()
         if value:
             return value
@@ -148,7 +163,8 @@ def stream_source_mode(key: str, url: str, configured_mode: str = "") -> str:
     configured = configured_mode.strip().lower() if isinstance(configured_mode, str) else ""
     if configured in STREAM_MODES:
         return configured
-    configured = os.environ.get(STREAM_SOURCE_DEFS[key]["mode_env"], "auto").strip().lower()
+    mode_env = STREAM_SOURCE_DEFS[key].get("mode_env", "")
+    configured = os.environ.get(mode_env, "auto").strip().lower() if mode_env else "auto"
     if configured in STREAM_MODES - {"auto"}:
         return configured
     lowered = url.lower().split("?", 1)[0]
@@ -157,6 +173,77 @@ def stream_source_mode(key: str, url: str, configured_mode: str = "") -> str:
     if lowered.endswith((".mp4", ".webm", ".ogg", ".ogv", ".m3u8")):
         return "video"
     return "iframe"
+
+
+def ndi_runtime() -> tuple[object, str]:
+    global _ndi_module, _ndi_error, _ndi_initialized
+    with _ndi_lock:
+        if _ndi_error:
+            return None, _ndi_error
+        if _ndi_initialized and _ndi_module is not None:
+            return _ndi_module, ""
+        try:
+            import NDIlib as ndi
+        except Exception as error:
+            _ndi_error = f"NDI Runtime oder Python-Binding fehlt: {error}"
+            return None, _ndi_error
+        if not ndi.initialize():
+            _ndi_error = "NDI Runtime konnte nicht initialisiert werden."
+            return None, _ndi_error
+        _ndi_module = ndi
+        _ndi_initialized = True
+        return ndi, ""
+
+
+def ndi_sources(timeout_ms: int = 1500) -> tuple[list[dict], str]:
+    ndi, error = ndi_runtime()
+    if not ndi:
+        return [], error
+
+    finder = ndi.find_create_v2()
+    if finder is None:
+        return [], "NDI-Finder konnte nicht gestartet werden."
+    try:
+        ndi.find_wait_for_sources(finder, timeout_ms)
+        sources = ndi.find_get_current_sources(finder)
+        return [{"name": source.ndi_name} for source in sources], ""
+    finally:
+        ndi.find_destroy(finder)
+
+
+def ndi_receiver_for_source(source_name: str, timeout_ms: int = 2000) -> tuple[object, object, str]:
+    ndi, error = ndi_runtime()
+    if not ndi:
+        return None, None, error
+
+    finder = ndi.find_create_v2()
+    if finder is None:
+        return ndi, None, "NDI-Finder konnte nicht gestartet werden."
+    try:
+        deadline = time.time() + max(timeout_ms, 0) / 1000
+        while True:
+            ndi.find_wait_for_sources(finder, 500)
+            for source in ndi.find_get_current_sources(finder):
+                if source.ndi_name == source_name:
+                    recv_create = ndi.RecvCreateV3()
+                    recv_create.color_format = ndi.RECV_COLOR_FORMAT_BGRX_BGRA
+                    receiver = ndi.recv_create_v3(recv_create)
+                    if receiver is None:
+                        return ndi, None, "NDI-Receiver konnte nicht gestartet werden."
+                    ndi.recv_connect(receiver, source)
+                    return ndi, receiver, ""
+            if time.time() >= deadline:
+                return ndi, None, f"NDI-Quelle nicht gefunden: {source_name}"
+    finally:
+        ndi.find_destroy(finder)
+
+
+def encode_bgrx_jpeg(frame) -> bytes:
+    rgb = frame[:, :, :3][:, :, ::-1].copy()
+    image = Image.fromarray(rgb, "RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=82, optimize=True)
+    return buffer.getvalue()
 
 
 def sanitize_stream_crop(crop: object) -> dict:
@@ -183,11 +270,15 @@ def sanitize_stream_configs(raw_streams: object) -> dict:
         raw_config = raw_streams.get(key) if isinstance(raw_streams.get(key), dict) else {}
         url = raw_config.get("url", "")
         mode = raw_config.get("mode", "auto")
-        streams[key] = {
+        config = {
             "url": url.strip() if isinstance(url, str) else "",
             "mode": mode if isinstance(mode, str) and mode in STREAM_MODES else "auto",
             "crop": sanitize_stream_crop(raw_config.get("crop")),
         }
+        if key == "ndi":
+            source_name = raw_config.get("source_name", "")
+            config["source_name"] = source_name.strip() if isinstance(source_name, str) else ""
+        streams[key] = config
     return streams
 
 
@@ -199,7 +290,9 @@ def stream_sources(state: dict = None) -> list[dict]:
         configured_url = config.get("url", "") if isinstance(config.get("url", ""), str) else ""
         url = configured_url.strip() or stream_source_url(key)
         configured_mode = config.get("mode", "auto") if isinstance(config.get("mode", "auto"), str) else "auto"
-        sources.append({
+        configured_source_name = config.get("source_name", "") if isinstance(config.get("source_name", ""), str) else ""
+        source_name = configured_source_name.strip() or stream_source_name(key)
+        source = {
             "key": key,
             "label": definition["label"],
             "current": make_stream_current(key),
@@ -207,9 +300,12 @@ def stream_sources(state: dict = None) -> list[dict]:
             "mode": stream_source_mode(key, url, configured_mode),
             "configured_mode": configured_mode,
             "crop": sanitize_stream_crop(config.get("crop")),
-            "configured": bool(url),
+            "configured": bool(source_name) if key == "ndi" else bool(url),
             "view_url": f"/stream-view/{key}",
-        })
+        }
+        if key == "ndi":
+            source["source_name"] = source_name
+        sources.append(source)
     return sources
 
 
@@ -1578,13 +1674,13 @@ def control():
           <div class="config-panel">
             <div class="crop-head">
               <div class="crop-title" id="stream-config-title">Stream konfigurieren</div>
-              <div class="crop-help">Browserfähige Stream- oder Player-URL eintragen.</div>
+              <div class="crop-help" id="stream-config-help">Browserfähige Stream- oder Player-URL eintragen.</div>
             </div>
             <form class="config-form" id="stream-config-form">
-              <label>URL
+              <label id="stream-config-url-label">URL
                 <input id="stream-config-url" name="url" type="url" placeholder="http://localhost:8080/player" autocomplete="off">
               </label>
-              <label>Modus
+              <label id="stream-config-mode-label">Modus
                 <select id="stream-config-mode" name="mode">
                   <option value="auto">Auto</option>
                   <option value="iframe">Iframe / Player-Seite</option>
@@ -1592,6 +1688,13 @@ def control():
                   <option value="image">Bild / MJPEG</option>
                 </select>
               </label>
+              <div id="ndi-config-fields" hidden>
+                <label>NDI-Quelle
+                  <select id="ndi-source-select" name="source_name"></select>
+                </label>
+                <button class="button compact" id="refresh-ndi-sources" type="button">Neu suchen</button>
+                <div class="save-state" id="ndi-source-status" aria-live="polite"></div>
+              </div>
               <div class="crop-actions">
                 <button class="button" id="cancel-stream-config" type="button">Abbrechen</button>
                 <button class="button primary" type="submit">Speichern</button>
@@ -1668,9 +1771,16 @@ def control():
 	          const streamCropFrame = document.getElementById("stream-crop-frame");
 	          const streamConfigModal = document.getElementById("stream-config-modal");
 	          const streamConfigTitle = document.getElementById("stream-config-title");
+	          const streamConfigHelp = document.getElementById("stream-config-help");
 	          const streamConfigForm = document.getElementById("stream-config-form");
+	          const streamConfigUrlLabel = document.getElementById("stream-config-url-label");
 	          const streamConfigUrl = document.getElementById("stream-config-url");
+	          const streamConfigModeLabel = document.getElementById("stream-config-mode-label");
 	          const streamConfigMode = document.getElementById("stream-config-mode");
+	          const ndiConfigFields = document.getElementById("ndi-config-fields");
+	          const ndiSourceSelect = document.getElementById("ndi-source-select");
+	          const refreshNdiSources = document.getElementById("refresh-ndi-sources");
+	          const ndiSourceStatus = document.getElementById("ndi-source-status");
 	          const cancelStreamConfig = document.getElementById("cancel-stream-config");
 	          const logoModal = document.getElementById("logo-modal");
 	          const secretGalleryTrigger = document.getElementById("secret-gallery-trigger");
@@ -1713,16 +1823,68 @@ def control():
 	            if (titleNode) titleNode.textContent = title;
 	            if (helpNode) helpNode.textContent = help;
 	          }
+	          function setNdiSourceOptions(sources, selectedSourceName) {
+	            const selectedName = selectedSourceName || "";
+	            ndiSourceSelect.replaceChildren();
+	            if (selectedName && !sources.some((source) => source.name === selectedName)) {
+	              const option = document.createElement("option");
+	              option.value = selectedName;
+	              option.textContent = `${selectedName} (gespeichert, gerade nicht gefunden)`;
+	              ndiSourceSelect.appendChild(option);
+	            }
+	            sources.forEach((source) => {
+	              const option = document.createElement("option");
+	              option.value = source.name;
+	              option.textContent = source.name;
+	              ndiSourceSelect.appendChild(option);
+	            });
+	            if (!ndiSourceSelect.options.length) {
+	              const option = document.createElement("option");
+	              option.value = "";
+	              option.textContent = "Keine NDI-Quelle gefunden";
+	              ndiSourceSelect.appendChild(option);
+	            }
+	            ndiSourceSelect.value = selectedName;
+	          }
+	          async function loadNdiSources(selectedSourceName = "") {
+	            ndiSourceStatus.textContent = "Suche NDI-Quellen...";
+	            refreshNdiSources.disabled = true;
+	            try {
+	              const response = await fetch("/api/ndi-sources", {cache: "no-store"});
+	              const result = await response.json().catch(() => ({}));
+	              setNdiSourceOptions(result.sources || [], selectedSourceName);
+	              if (!response.ok || !result.ok) {
+	                ndiSourceStatus.textContent = result.error || "NDI-Quellen konnten nicht gelesen werden.";
+	                ndiSourceStatus.classList.add("error");
+	              } else {
+	                ndiSourceStatus.textContent = result.sources.length ? `${result.sources.length} NDI-Quelle(n) gefunden.` : "Keine NDI-Quelle gefunden.";
+	                ndiSourceStatus.classList.toggle("error", !result.sources.length);
+	              }
+	            } catch (error) {
+	              setNdiSourceOptions([], selectedSourceName);
+	              ndiSourceStatus.textContent = "NDI-Quellen konnten nicht gelesen werden.";
+	              ndiSourceStatus.classList.add("error");
+	            } finally {
+	              refreshNdiSources.disabled = false;
+	            }
+	          }
 	          function openStreamConfig(key) {
 	            const source = streamByKey(key);
 	            if (!source) return;
 	            editingStreamKey = key;
 	            streamConfigTitle.textContent = `${source.label} konfigurieren`;
+	            const isNdi = key === "ndi";
+	            streamConfigHelp.textContent = isNdi ? "NDI-Quelle im Netzwerk suchen und nach Streamnamen auswählen." : "Browserfähige Stream- oder Player-URL eintragen.";
+	            streamConfigUrlLabel.hidden = isNdi;
+	            streamConfigModeLabel.hidden = isNdi;
+	            ndiConfigFields.hidden = !isNdi;
+	            streamConfigUrl.required = !isNdi;
 	            streamConfigUrl.value = source.url || "";
 	            streamConfigMode.value = source.configured_mode || "auto";
+	            if (isNdi) loadNdiSources(source.source_name || "");
 	            streamConfigModal.classList.add("open");
 	            streamConfigModal.setAttribute("aria-hidden", "false");
-	            window.setTimeout(() => streamConfigUrl.focus(), 0);
+	            window.setTimeout(() => (isNdi ? ndiSourceSelect : streamConfigUrl).focus(), 0);
 	          }
 	          function closeStreamConfig() {
 	            streamConfigModal.classList.remove("open");
@@ -1739,6 +1901,7 @@ def control():
 	                key,
 	                url: values.url ?? source.url ?? "",
 	                mode: values.mode ?? source.configured_mode ?? "auto",
+	                source_name: values.source_name ?? source.source_name ?? "",
 	                crop: values.crop ?? source.crop
 	              })
 	            });
@@ -1978,13 +2141,14 @@ def control():
 	          streamConfigForm.addEventListener("submit", async (event) => {
 	            event.preventDefault();
 	            if (!editingStreamKey) return;
-	            const ok = await saveStreamSource(editingStreamKey, {
-	              url: streamConfigUrl.value,
-	              mode: streamConfigMode.value
-	            });
+	            const values = editingStreamKey === "ndi"
+	              ? {source_name: ndiSourceSelect.value}
+	              : {url: streamConfigUrl.value, mode: streamConfigMode.value};
+	            const ok = await saveStreamSource(editingStreamKey, values);
 	            if (!ok) return;
 	            window.location.reload();
 	          });
+	          refreshNdiSources.addEventListener("click", () => loadNdiSources(ndiSourceSelect.value));
 	          logoModal.addEventListener("click", (event) => {
 	            if (event.target === logoModal) closeLogoEditor();
 	          });
@@ -2353,6 +2517,9 @@ def stream_view(key):
     direct_rtmp = scheme in {"rtmp", "rtmps", "rtmpe", "rtmpt"}
     crop_edit = "cropEdit" in request.args
     crop = {"x": 0, "y": 0, "w": 1, "h": 1} if crop_edit else stream["crop"]
+    ndi_error = ""
+    if key == "ndi" and stream["configured"]:
+        _, ndi_error = ndi_runtime()
     return render_template_string(
         """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ stream.label }}</title>
         <style>
@@ -2370,7 +2537,17 @@ def stream_view(key):
           .message small { display: block; margin-top: .8em; color: rgba(255,255,255,.48); font-size: .62em; font-weight: 700; }
         </style></head><body>
         {% if not stream.configured %}
-          <div class="message">{{ stream.label }} ist noch nicht konfiguriert.<small>{{ stream.label }}_STREAM_URL setzen und App neu starten.</small></div>
+          <div class="message">{% if stream.key == "ndi" %}NDI-Quelle auswählen.{% else %}{{ stream.label }} ist noch nicht konfiguriert.{% endif %}<small>{% if stream.key == "ndi" %}In Setup eine gefundene NDI-Quelle nach Namen speichern.{% else %}{{ stream.label }}_STREAM_URL setzen oder Setup verwenden.{% endif %}</small></div>
+        {% elif stream.key == "ndi" and ndi_error %}
+          <div class="message">NDI Runtime ist nicht verfügbar.<small>{{ ndi_error }}</small></div>
+        {% elif stream.key == "ndi" %}
+          <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><img class="media" id="ndi-media" src="{{ url_for('ndi_mjpeg') }}?source={{ stream.source_name|urlencode }}&v={{ state.version }}" alt=""></div>
+          <div class="message" id="ndi-message" hidden>NDI-Stream konnte nicht gestartet werden.<small>Quelle prüfen oder im Setup neu suchen.</small></div>
+          <script>
+            document.getElementById("ndi-media").addEventListener("error", () => {
+              document.getElementById("ndi-message").hidden = false;
+            });
+          </script>
         {% elif direct_rtmp %}
           <div class="message">RTMP kann Chromium nicht direkt abspielen.<small>Bitte als HLS/WebRTC/MJPEG oder als Browser-Player-URL bereitstellen.</small></div>
         {% elif stream.mode == "image" %}
@@ -2396,8 +2573,48 @@ def stream_view(key):
         {% endif %}
         </body></html>""",
         stream=stream,
+        state=state,
         crop=crop,
         direct_rtmp=direct_rtmp,
+        ndi_error=ndi_error,
+    )
+
+
+@app.route("/ndi-mjpeg")
+def ndi_mjpeg():
+    source_name = request.args.get("source", "").strip()
+    if not source_name:
+        abort(400)
+
+    ndi, receiver, error = ndi_receiver_for_source(source_name)
+    if receiver is None:
+        status = 404 if error.startswith("NDI-Quelle") else 503
+        return Response(error, status=status, mimetype="text/plain")
+
+    def frames():
+        try:
+            while True:
+                frame_type, video_frame, audio_frame, _ = ndi.recv_capture_v2(
+                    receiver,
+                    2000,
+                    want_audio=False,
+                    want_metadata=False,
+                )
+                if frame_type == ndi.FRAME_TYPE_VIDEO:
+                    try:
+                        jpg = encode_bgrx_jpeg(video_frame.data)
+                    finally:
+                        ndi.recv_free_video_v2(receiver, video_frame)
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode("ascii") + b"\r\n\r\n" + jpg + b"\r\n"
+                elif frame_type == ndi.FRAME_TYPE_AUDIO:
+                    ndi.recv_free_audio_v2(receiver, audio_frame)
+        finally:
+            ndi.recv_destroy(receiver)
+
+    return Response(
+        stream_with_context(frames()),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -2650,6 +2867,15 @@ def api_settings():
     return jsonify({"ok": True, **new_state})
 
 
+@app.route("/api/ndi-sources")
+@login_required
+def api_ndi_sources():
+    sources, error = ndi_sources()
+    if error:
+        return jsonify({"ok": False, "error": error, "sources": sources}), 503
+    return jsonify({"ok": True, "sources": sources})
+
+
 @app.route("/api/stream-source", methods=["POST"])
 @login_required
 def api_stream_source():
@@ -2664,17 +2890,24 @@ def api_stream_source():
     url = payload.get("url", current_config["url"])
     mode = payload.get("mode", current_config["mode"])
     crop = payload.get("crop", current_config["crop"])
+    source_name = payload.get("source_name", current_config.get("source_name", ""))
 
-    if not isinstance(url, str):
-        return jsonify({"ok": False, "error": "invalid url"}), 400
-    if not isinstance(mode, str) or mode not in STREAM_MODES:
-        return jsonify({"ok": False, "error": "invalid mode"}), 400
+    if key == "ndi":
+        if not isinstance(source_name, str):
+            return jsonify({"ok": False, "error": "invalid source name"}), 400
+    else:
+        if not isinstance(url, str):
+            return jsonify({"ok": False, "error": "invalid url"}), 400
+        if not isinstance(mode, str) or mode not in STREAM_MODES:
+            return jsonify({"ok": False, "error": "invalid mode"}), 400
 
     streams[key] = {
-        "url": url.strip(),
-        "mode": mode,
+        "url": "" if key == "ndi" else url.strip(),
+        "mode": "auto" if key == "ndi" else mode,
         "crop": sanitize_stream_crop(crop),
     }
+    if key == "ndi":
+        streams[key]["source_name"] = source_name.strip()
     new_state = {**state, "streams": streams, "version": state["version"] + 1}
     write_state(new_state)
     return jsonify({"ok": True, **state_response(new_state)})
