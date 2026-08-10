@@ -55,15 +55,17 @@ Auswahl über den NDI-Streamnamen, wie in NDI Tools oder OBS. Dafür müssen die
 NDI Runtime und das Python-Binding `NDIlib` auf dem Rechner verfügbar sein;
 unter Linux muss außerdem Discovery über Avahi/mDNS funktionieren.
 
-RTMP bleibt eine browserfähige Zwischenquelle, zum Beispiel MJPEG, MP4/WebM,
-eine WebRTC- oder HLS-Player-Seite. Mit `Ausschnitt bearbeiten` wird der
-sichtbare 9:16-Ausschnitt der gewählten Streamquelle eingestellt.
+RTMP kann direkt als `rtmp://...` eingetragen werden. Die App wandelt den Stream
+lokal mit `ffmpeg` in einen Browserstream für Chromium um. Browserfähige
+Zwischenquellen wie MJPEG, MP4/WebM, WebRTC oder HLS funktionieren weiterhin.
+Mit `Ausschnitt bearbeiten` wird der sichtbare 9:16-Ausschnitt der gewählten
+Streamquelle eingestellt.
 
 Startwerte können weiterhin per Umgebung gesetzt werden:
 
 ```bash
 export NDI_SOURCE_NAME="RECHNERNAME (Kamera 1)"
-export RTMP_STREAM_URL="http://localhost:8080/rtmp-player"
+export RTMP_STREAM_URL="rtmp://192.168.0.133:1935/live/stream"
 ```
 
 Für RTMP kann festgelegt werden, wie die URL eingebettet wird:
@@ -116,7 +118,7 @@ Einmalig installieren:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-flask python3-pil curl chromium git unclutter
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter ffmpeg
 ```
 
 Projekt starten:
@@ -137,7 +139,7 @@ Wenn der Rechner automatisch in den Desktop startet:
 
 ```bash
 cd /home/mms/rednerpult
-sudo apt install -y python3-flask python3-pil curl chromium git unclutter
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter ffmpeg
 chmod +x install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 ```
@@ -170,7 +172,7 @@ Kompletter Copy-Paste-Block für die Ersteinrichtung:
 ```bash
 cd /home/mms/rednerpult
 sudo apt update
-sudo apt install -y python3-flask python3-pil curl chromium git unclutter
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter ffmpeg
 chmod +x start-pult-display-python-linux.sh install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 pkill -f /home/mms/rednerpult/app.py || true

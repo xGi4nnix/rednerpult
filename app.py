@@ -9,7 +9,7 @@ import threading
 import time
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from flask import (
     Flask,
@@ -59,6 +59,7 @@ STREAM_SOURCE_DEFS = {
 }
 DEFAULT_STREAM_CROP = {"x": 0.34375, "y": 0.0, "w": 0.3125, "h": 1.0}
 STREAM_MODES = {"auto", "video", "iframe", "image"}
+RTMP_SCHEMES = {"rtmp", "rtmps", "rtmpe", "rtmpt"}
 DEFAULT_LOGO = {"filename": "", "x": 0.5, "y": 0.5, "w": 0.34}
 DEFAULT_STATE = {
     "current": "logo.png",
@@ -157,6 +158,44 @@ def stream_source_name(key: str) -> str:
         if value:
             return value
     return ""
+
+
+def normalize_rtmp_url(url: str) -> str:
+    value = url.strip()
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.port == 1935:
+        scheme = "rtmps" if parsed.scheme == "https" else "rtmp"
+        return urlunparse(parsed._replace(scheme=scheme))
+    return value
+
+
+def ffmpeg_binary() -> str:
+    configured = os.environ.get("FFMPEG_BIN", "").strip()
+    if configured:
+        return configured
+    return shutil.which("ffmpeg") or ""
+
+
+def jpeg_frames_from_stream(handle):
+    buffer = b""
+    while True:
+        chunk = handle.read(32768)
+        if not chunk:
+            return
+        buffer += chunk
+        while True:
+            start = buffer.find(b"\xff\xd8")
+            if start < 0:
+                buffer = buffer[-1:]
+                break
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end < 0:
+                if start > 0:
+                    buffer = buffer[start:]
+                break
+            frame = buffer[start:end + 2]
+            buffer = buffer[end + 2:]
+            yield frame
 
 
 def stream_source_mode(key: str, url: str, configured_mode: str = "") -> str:
@@ -289,6 +328,8 @@ def stream_sources(state: dict = None) -> list[dict]:
         config = stream_configs.get(key, {}) if isinstance(stream_configs.get(key), dict) else {}
         configured_url = config.get("url", "") if isinstance(config.get("url", ""), str) else ""
         url = configured_url.strip() or stream_source_url(key)
+        if key == "rtmp":
+            url = normalize_rtmp_url(url)
         configured_mode = config.get("mode", "auto") if isinstance(config.get("mode", "auto"), str) else "auto"
         configured_source_name = config.get("source_name", "") if isinstance(config.get("source_name", ""), str) else ""
         source_name = configured_source_name.strip() or stream_source_name(key)
@@ -1874,11 +1915,17 @@ def control():
 	            editingStreamKey = key;
 	            streamConfigTitle.textContent = `${source.label} konfigurieren`;
 	            const isNdi = key === "ndi";
-	            streamConfigHelp.textContent = isNdi ? "NDI-Quelle im Netzwerk suchen und nach Streamnamen auswählen." : "Browserfähige Stream- oder Player-URL eintragen.";
+	            const isRtmp = key === "rtmp";
+	            streamConfigHelp.textContent = isNdi
+	              ? "NDI-Quelle im Netzwerk suchen und nach Streamnamen auswählen."
+	              : isRtmp
+	                ? "RTMP-URL eintragen. Die App wandelt sie lokal mit ffmpeg für Chromium um."
+	                : "Browserfähige Stream- oder Player-URL eintragen.";
 	            streamConfigUrlLabel.hidden = isNdi;
 	            streamConfigModeLabel.hidden = isNdi;
 	            ndiConfigFields.hidden = !isNdi;
 	            streamConfigUrl.required = !isNdi;
+	            streamConfigUrl.placeholder = isRtmp ? "rtmp://192.168.0.133:1935/live/stream" : "http://localhost:8080/player";
 	            streamConfigUrl.value = source.url || "";
 	            streamConfigMode.value = source.configured_mode || "auto";
 	            if (isNdi) loadNdiSources(source.source_name || "");
@@ -2514,7 +2561,7 @@ def stream_view(key):
     state = read_state()
     stream = next(item for item in stream_sources(state) if item["key"] == key)
     scheme = urlparse(stream["url"]).scheme.lower()
-    direct_rtmp = scheme in {"rtmp", "rtmps", "rtmpe", "rtmpt"}
+    direct_rtmp = scheme in RTMP_SCHEMES
     crop_edit = "cropEdit" in request.args
     crop = {"x": 0, "y": 0, "w": 1, "h": 1} if crop_edit else stream["crop"]
     ndi_error = ""
@@ -2549,7 +2596,13 @@ def stream_view(key):
             });
           </script>
         {% elif direct_rtmp %}
-          <div class="message">RTMP kann Chromium nicht direkt abspielen.<small>Bitte als HLS/WebRTC/MJPEG oder als Browser-Player-URL bereitstellen.</small></div>
+          <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><img class="media" id="rtmp-media" src="{{ url_for('rtmp_mjpeg') }}?source={{ stream.url|urlencode }}&v={{ state.version }}" alt=""></div>
+          <div class="message" id="rtmp-message" hidden>RTMP-Stream konnte nicht gestartet werden.<small>ffmpeg installieren oder Stream-URL prüfen.</small></div>
+          <script>
+            document.getElementById("rtmp-media").addEventListener("error", () => {
+              document.getElementById("rtmp-message").hidden = false;
+            });
+          </script>
         {% elif stream.mode == "image" %}
           <div class="crop-source" style="--crop-x: {{ crop.x }}; --crop-y: {{ crop.y }}; --crop-w: {{ crop.w }}; --crop-h: {{ crop.h }};"><img class="media" src="{{ stream.url }}" alt=""></div>
         {% elif stream.mode == "video" %}
@@ -2610,6 +2663,71 @@ def ndi_mjpeg():
                     ndi.recv_free_audio_v2(receiver, audio_frame)
         finally:
             ndi.recv_destroy(receiver)
+
+    return Response(
+        stream_with_context(frames()),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.route("/rtmp-mjpeg")
+def rtmp_mjpeg():
+    source_url = normalize_rtmp_url(request.args.get("source", ""))
+    if urlparse(source_url).scheme.lower() not in RTMP_SCHEMES:
+        abort(400)
+    configured_url = next(item for item in stream_sources(read_state()) if item["key"] == "rtmp")["url"]
+    if source_url != configured_url:
+        abort(403)
+
+    ffmpeg = ffmpeg_binary()
+    if not ffmpeg:
+        return Response("ffmpeg ist nicht installiert.", status=503, mimetype="text/plain")
+
+    command = [
+        ffmpeg,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-i",
+        source_url,
+        "-an",
+        "-c:v",
+        "mjpeg",
+        "-q:v",
+        "6",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+    ]
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        return Response(f"ffmpeg konnte nicht gestartet werden: {error}", status=503, mimetype="text/plain")
+
+    def frames():
+        try:
+            if process.stdout is None:
+                return
+            for jpg in jpeg_frames_from_stream(process.stdout):
+                yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode("ascii") + b"\r\n\r\n" + jpg + b"\r\n"
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
     return Response(
         stream_with_context(frames()),
@@ -2902,7 +3020,7 @@ def api_stream_source():
             return jsonify({"ok": False, "error": "invalid mode"}), 400
 
     streams[key] = {
-        "url": "" if key == "ndi" else url.strip(),
+        "url": "" if key == "ndi" else normalize_rtmp_url(url) if key == "rtmp" else url.strip(),
         "mode": "auto" if key == "ndi" else mode,
         "crop": sanitize_stream_crop(crop),
     }
