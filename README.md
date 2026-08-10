@@ -116,9 +116,7 @@ Einmalig installieren:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv curl chromium git unclutter
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-python.txt
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 ```
 
 Projekt starten:
@@ -139,9 +137,7 @@ Wenn der Rechner automatisch in den Desktop startet:
 
 ```bash
 cd /home/mms/rednerpult
-sudo apt install -y python3 python3-venv curl chromium git unclutter
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-python.txt
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 chmod +x install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 ```
@@ -174,9 +170,7 @@ Kompletter Copy-Paste-Block für die Ersteinrichtung:
 ```bash
 cd /home/mms/rednerpult
 sudo apt update
-sudo apt install -y python3 python3-venv curl chromium git unclutter
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-python.txt
+sudo apt install -y python3-flask python3-pil curl chromium git unclutter
 chmod +x start-pult-display-python-linux.sh install-python-autostart-linux.sh
 ./install-python-autostart-linux.sh
 pkill -f /home/mms/rednerpult/app.py || true
@@ -279,7 +273,7 @@ Ohne Kiosk-Browser:
 
 ```bash
 cd /home/mms/rednerpult
-.venv/bin/python app.py
+python3 app.py
 ```
 
 Dann öffnen:

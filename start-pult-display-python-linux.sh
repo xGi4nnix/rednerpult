@@ -8,10 +8,6 @@ URL="http://localhost:5000/display"
 HEALTH_URL="http://localhost:5000/health"
 LOG_FILE="$APP_DIR/pult-display.log"
 BROWSER_PROFILE_DIR="$APP_DIR/browser-profile"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if [[ -x "$APP_DIR/.venv/bin/python" ]]; then
-  PYTHON_BIN="$APP_DIR/.venv/bin/python"
-fi
 
 export APP_SECRET="${APP_SECRET:-pult-display-local-secret}"
 export ADMIN_USER="${ADMIN_USER:-admin}"
@@ -29,8 +25,8 @@ webapp_pids() {
 
 start_webapp() {
   if ! webapp_pids >/dev/null; then
-    echo "Starte Pult Display Webapp mit $PYTHON_BIN..."
-    nohup "$PYTHON_BIN" "$APP_DIR/app.py" > "$LOG_FILE" 2>&1 &
+    echo "Starte Pult Display Webapp..."
+    nohup python3 "$APP_DIR/app.py" > "$LOG_FILE" 2>&1 &
   else
     echo "Pult Display Webapp laeuft bereits."
   fi
@@ -184,21 +180,12 @@ hide_mouse_cursor() {
 
 hide_mouse_cursor
 
-if ! "$PYTHON_BIN" -c "import flask, PIL" >/dev/null 2>&1; then
+if ! python3 -c "import flask, PIL" >/dev/null 2>&1; then
   echo "Fehler: Flask oder Pillow ist nicht installiert."
   echo "Installiere es mit:"
   echo "  sudo apt update"
   echo "  sudo apt install -y python3-flask python3-pil git unclutter"
-  echo "oder mit venv:"
-  echo "  python3 -m venv .venv"
-  echo "  .venv/bin/python -m pip install -r requirements-python.txt"
   exit 1
-fi
-
-if ! "$PYTHON_BIN" -c "import NDIlib" >/dev/null 2>&1; then
-  echo "Hinweis: NDI ist nicht verfuegbar, weil das Python-Binding NDIlib fehlt."
-  echo "Installiere NDI fuer die verwendete Python-Umgebung, z.B.:"
-  echo "  $PYTHON_BIN -m pip install -r requirements-python.txt"
 fi
 
 start_webapp
