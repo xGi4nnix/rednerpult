@@ -680,6 +680,25 @@ def schedule_reboot() -> None:
     threading.Thread(target=reboot_later, daemon=True).start()
 
 
+def schedule_shutdown() -> None:
+    def shutdown_later() -> None:
+        time.sleep(1)
+        commands = [
+            ["systemctl", "poweroff"],
+            ["sudo", "-n", "poweroff"],
+            ["sudo", "-n", "shutdown", "-h", "now"],
+        ]
+        for command in commands:
+            try:
+                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                return
+
+    threading.Thread(target=shutdown_later, daemon=True).start()
+
+
 def crop_slide_file(filename: str, crop: dict) -> None:
     resolved = safe_join(str(SLIDES_DIR), filename)
     if not resolved:
@@ -1560,6 +1579,7 @@ def control():
           <div class="admin-actions">
             <button class="button compact" id="git-update" type="button">Update</button>
             <button class="button compact danger" id="system-reboot" type="button">Reboot</button>
+            <button class="button compact danger" id="system-shutdown" type="button">Shutdown</button>
           </div>
           <div class="connection-status" id="connection-status" role="status" aria-live="polite">
             <span class="connection-dot" aria-hidden="true"></span>
@@ -1804,6 +1824,7 @@ def control():
 	          const slideUploadSubmit = document.getElementById("slide-upload-submit");
 	          const gitUpdateButton = document.getElementById("git-update");
 	          const systemRebootButton = document.getElementById("system-reboot");
+	          const systemShutdownButton = document.getElementById("system-shutdown");
 	          const cropModal = document.getElementById("crop-modal");
 	          const cropImage = document.getElementById("crop-image");
 	          const cropBox = document.getElementById("crop-box");
@@ -2496,6 +2517,14 @@ def control():
               "Reboot..."
             );
           });
+          systemShutdownButton.addEventListener("click", () => {
+            runAdminAction(
+              systemShutdownButton,
+              "/api/shutdown",
+              "Rednerpult-PC wirklich herunterfahren?",
+              "Shutdown..."
+            );
+          });
           async function saveSettings(reload = true) {
             window.clearTimeout(settingsTimer);
             const duration = Number.parseInt(durationInput.value, 10);
@@ -3153,6 +3182,16 @@ def api_reboot():
     return jsonify({
         "ok": True,
         "message": "Reboot wurde angefordert. Wenn der PC nicht neu startet, braucht der App-User sudo-Rechte fuer reboot.",
+    })
+
+
+@app.route("/api/shutdown", methods=["POST"])
+@login_required
+def api_shutdown():
+    schedule_shutdown()
+    return jsonify({
+        "ok": True,
+        "message": "Shutdown wurde angefordert. Wenn der PC nicht herunterfaehrt, braucht der App-User sudo-Rechte fuer poweroff.",
     })
 
 
